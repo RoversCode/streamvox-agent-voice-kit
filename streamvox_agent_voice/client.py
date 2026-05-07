@@ -48,7 +48,6 @@ class VoiceClient:
         text: str,
         *,
         event: str = "progress",
-        priority: str = "normal",
         action: str = "enqueue",
         interrupt: bool = False,
         wait: bool = False,
@@ -62,7 +61,6 @@ class VoiceClient:
         核心入参:
             text: 需要播报的文本。
             event: 事件类型，默认 progress。
-            priority: 队列优先级，默认 normal。
             action: 显式队列控制策略，默认 enqueue。
             interrupt: 是否打断当前播报。
             wait: 是否等待 Runtime 播报完成。
@@ -77,7 +75,43 @@ class VoiceClient:
             本方法会先本地校验 VoiceEvent；HTTP 层失败由 httpx 抛出。
         """
 
-        # 在客户端侧先构造事件，尽早发现非法 event/priority/text，减少 Runtime 噪声。
+        return await self._send_event(
+            text,
+            event=event,
+            action=action,
+            interrupt=interrupt,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def _send_event(
+        self,
+        text: str,
+        *,
+        event: str,
+        action: str,
+        interrupt: bool,
+        wait: bool,
+        role_name: str | None,
+        streamvox: dict[str, Any] | None,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """
+        发送内部事件请求。
+
+        核心入参:
+            text/event/action/interrupt/wait/role_name/streamvox/metadata: Runtime 底层协议字段。
+
+        预期输出:
+            返回 Runtime JSON 响应；priority 只作为 Runtime 事件结构占位，不在 Client 层开放或选择。
+
+        边界异常:
+            本方法会先本地校验 VoiceEvent；HTTP 层失败由 httpx 抛出。
+        """
+
+        # 在客户端侧先构造事件，尽早发现非法 event/text/action，减少 Runtime 噪声。
         # 关键变量：merged_metadata 统一承载公开 metadata、角色覆盖和模型私有透传参数。
         merged_metadata = dict(metadata or {})
         if role_name is not None:
@@ -93,7 +127,6 @@ class VoiceClient:
         voice_event = VoiceEvent(
             event=event,
             text=text,
-            priority=priority,
             action=action,
             interrupt=interrupt,
             wait=wait,
@@ -134,7 +167,7 @@ class VoiceClient:
         policy = resolve_voice_policy(policy_name)
 
         # 策略字段统一从 policy 展开，业务意图是让 Agent 只选择意图，不直接操纵底层队列动作。
-        return await self.say(
+        return await self._send_event(
             text,
             **policy.to_event_kwargs(),
             wait=wait,
@@ -233,7 +266,7 @@ class VoiceClient:
             metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
-            返回 Runtime JSON 响应，默认映射为 error/interrupt/high。
+            返回 Runtime JSON 响应，默认映射为 error/interrupt。
 
         边界异常:
             同 say。
@@ -312,9 +345,11 @@ class VoiceClient:
         """
 
         # error 只是语义标签，不隐式打断队列；调用方需要打断时应显式使用 interrupt(...)。
-        return await self.say(
+        return await self._send_event(
             text,
             event="error",
+            action="enqueue",
+            interrupt=False,
             wait=wait,
             role_name=role_name,
             streamvox=streamvox,
@@ -347,10 +382,9 @@ class VoiceClient:
             同 say。
         """
 
-        return await self.say(
+        return await self._send_event(
             text,
             event="interrupt",
-            priority="high",
             action="interrupt",
             interrupt=True,
             wait=wait,

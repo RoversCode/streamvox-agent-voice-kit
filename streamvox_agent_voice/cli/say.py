@@ -132,7 +132,6 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
     *,
     text: str | None,
     event: str,
-    priority: str,
     action: str,
     interrupt_text: str | None,
     stop: bool,
@@ -142,7 +141,7 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
     校验高层策略入口没有混用底层控制参数。
 
     核心入参:
-        text/event/priority/action/interrupt_text/stop/interrupt_current: CLI 原始协议参数。
+        text/event/action/interrupt_text/stop/interrupt_current: CLI 原始协议参数。
 
     预期输出:
         参数组合清晰时无返回值。
@@ -155,9 +154,9 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
     if text is not None:
         raise typer.BadParameter("TEXT argument cannot be used together with --info/--progress/--urgent/--done")
 
-    # 高层策略已经固定 event/priority/action，业务意图是阻止调用方绕过策略层直接改底层动作。
-    if event != "progress" or priority != "normal" or action != "enqueue":
-        raise typer.BadParameter("--event/--priority/--action cannot be combined with high-level policy options")
+    # 高层策略已经固定 event/action，业务意图是阻止调用方绕过策略层直接改底层动作。
+    if event != "progress" or action != "enqueue":
+        raise typer.BadParameter("--event/--action cannot be combined with high-level policy options")
 
     # stop 和 interrupt 是独立控制入口，不能和高层播报意图混用。
     if stop or interrupt_text is not None or interrupt_current:
@@ -168,7 +167,6 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
 def send(
     text: Optional[str] = typer.Argument(None, help="Text to speak."),
     event: str = typer.Option("progress", "--event", help="Event type: started/progress/done/error/interrupt/stop."),
-    priority: str = typer.Option("normal", "--priority", help="Queue priority: low/normal/high."), # 预设字段，还没开发
     action: str = typer.Option(
         "enqueue", # 默认入队
         "--action",
@@ -208,7 +206,7 @@ def send(
     向 Runtime 发送语音事件。
 
     核心入参:
-        text/event/priority/action/interrupt_text/stop/info_text/progress_text/urgent_text/done_text/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
+        text/event/action/interrupt_text/stop/info_text/progress_text/urgent_text/done_text/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
 
     预期输出:
         stdout 输出 Runtime 响应 JSON；默认投递后快速返回。
@@ -226,7 +224,6 @@ def send(
         _ensure_raw_controls_are_not_mixed_with_policy(
             text=text,
             event=event,
-            priority=priority,
             action=action,
             interrupt_text=interrupt_text,
             stop=stop,
@@ -253,12 +250,8 @@ def send(
     if interrupt_text is not None:
         _print_json(
             asyncio.run(
-                client.say(
+                client.interrupt(
                     interrupt_text,
-                    event="interrupt",
-                    priority="high",
-                    action="interrupt",
-                    interrupt=True,
                     wait=wait,
                     metadata=metadata or None,
                 )
@@ -273,7 +266,6 @@ def send(
                 client.say(
                     text or "",
                     event=event,
-                    priority=priority,
                     action="stop",
                     wait=wait,
                     metadata=metadata or None,
@@ -291,7 +283,6 @@ def send(
             client.say(
                 text,
                 event=event,
-                priority=priority,
                 action="interrupt" if interrupt_current else action, # 默认action是enqueue
                 interrupt=interrupt_current,
                 wait=wait,

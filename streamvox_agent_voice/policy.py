@@ -16,7 +16,6 @@ class VoicePolicy:
 
     核心入参:
         event: Runtime 语义事件标签，用于日志、状态和未来 UI 展示。
-        priority: Runtime 队列优先级，当前主要用于表达 urgent 的高优先级意图。
         action: Runtime 显式队列控制动作，决定当前播报是否入队、替换、清队或打断。
         interrupt: 兼容旧协议的显式打断布尔值，urgent 需要同时置位以确保旧调用链一致。
 
@@ -28,7 +27,6 @@ class VoicePolicy:
     """
 
     event: str
-    priority: str
     action: str
     interrupt: bool = False
 
@@ -40,7 +38,7 @@ class VoicePolicy:
             本方法不接收额外参数，直接读取当前策略字段。
 
         预期输出:
-            返回 event/priority/action/interrupt 四个底层协议字段。
+            返回 event/action/interrupt 三个底层协议字段。
 
         边界异常:
             不抛异常；调用方仍会通过 VoiceEvent.validate 做最终协议校验。
@@ -48,7 +46,6 @@ class VoicePolicy:
 
         return {
             "event": self.event,
-            "priority": self.priority,
             "action": self.action,
             "interrupt": self.interrupt,
         }
@@ -57,16 +54,16 @@ class VoicePolicy:
 # 关键常量：默认策略映射只在这里维护，避免 CLI 和 Python Client 各自复制一份规则后漂移。
 DEFAULT_VOICE_POLICIES: dict[str, VoicePolicy] = {
     # 普通信息只做顺序入队，业务意图是保留说明性播报的完整顺序。
-    "info": VoicePolicy(event="progress", priority="normal", action="enqueue"),
+    "info": VoicePolicy(event="progress", action="enqueue"),
 
     # 进度播报允许覆盖尚未播放的旧 progress，业务意图是避免用户听到过期过程。
-    "progress": VoicePolicy(event="progress", priority="normal", action="replace_pending"),
+    "progress": VoicePolicy(event="progress", action="replace_pending"),
 
     # 紧急播报必须立即打断，业务意图是让错误或风险信息不要滞后于普通队列。
-    "urgent": VoicePolicy(event="error", priority="high", action="interrupt", interrupt=True),
+    "urgent": VoicePolicy(event="error", action="interrupt", interrupt=True),
 
     # 完成播报清理旧待播内容再收尾，业务意图是让最终结果优先于过期进度。
-    "done": VoicePolicy(event="done", priority="normal", action="clear_pending_then_enqueue"),
+    "done": VoicePolicy(event="done", action="clear_pending_then_enqueue"),
 }
 
 

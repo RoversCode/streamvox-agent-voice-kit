@@ -14,6 +14,13 @@ StreamVox Runtime 决定“怎么说”。
 - `VoiceClient`：异步 Python 客户端，可用于 Jarvis 风格命令行、Claude Code SDK 包装层、Codex Hook、OpenClaw Skill 或自定义 Agent。
 - 事件协议：使用一个小而稳定的 JSON 结构，让 Agent 逻辑与 TTS 播放逻辑保持解耦。
 
+当前公开调用面只推荐两层心智模型：
+
+- 高层意图接口：`info/progress/urgent/done/stop`
+- 底层协议字段：`event/action/wait`
+
+`priority` 目前仍保留在 Runtime 底层事件结构中，但由于尚未形成独立调度语义，因此不作为公开 CLI / Python Client 参数暴露，高层策略也不会设置它。
+
 ## 这不是什么
 
 - 不是 Agent 框架。
