@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from .events import VoiceEvent
+from .policy import resolve_voice_policy
 
 
 class VoiceClient:
@@ -101,48 +102,243 @@ class VoiceClient:
         voice_event.validate()
         return await self._post_json("/events", voice_event.to_payload())
 
-    async def done(self, text: str, *, wait: bool = False) -> dict[str, Any]:
+    async def _say_with_policy(
+        self,
+        policy_name: str,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        按高层语音策略发送播报事件。
+
+        核心入参:
+            policy_name: 高层意图名称，例如 info/progress/urgent/done。
+            text: 需要播报的文本。
+            wait: 是否等待 Runtime 播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
+
+        预期输出:
+            返回 Runtime JSON 响应；底层 event/action 由策略表统一决定。
+
+        边界异常:
+            未知 policy_name 会抛出 ValueError；HTTP 层失败由 httpx 抛出。
+        """
+
+        # 关键变量：policy 是高层意图的唯一映射来源，避免 Client 方法和 CLI 入口规则漂移。
+        policy = resolve_voice_policy(policy_name)
+
+        # 策略字段统一从 policy 展开，业务意图是让 Agent 只选择意图，不直接操纵底层队列动作。
+        return await self.say(
+            text,
+            **policy.to_event_kwargs(),
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def info(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        发送普通说明性播报。
+
+        核心入参:
+            text: 普通说明文本。
+            wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
+
+        预期输出:
+            返回 Runtime JSON 响应，默认映射为 progress/enqueue。
+
+        边界异常:
+            同 say。
+        """
+
+        return await self._say_with_policy(
+            "info",
+            text,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def progress(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        发送可被后续进度覆盖的进度播报。
+
+        核心入参:
+            text: 当前最新进度文本。
+            wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
+
+        预期输出:
+            返回 Runtime JSON 响应，默认映射为 progress/replace_pending。
+
+        边界异常:
+            同 say。
+        """
+
+        return await self._say_with_policy(
+            "progress",
+            text,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def urgent(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        发送必须立刻插播的紧急播报。
+
+        核心入参:
+            text: 紧急提醒、警告或错误文本。
+            wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
+
+        预期输出:
+            返回 Runtime JSON 响应，默认映射为 error/interrupt/high。
+
+        边界异常:
+            同 say。
+        """
+
+        return await self._say_with_policy(
+            "urgent",
+            text,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def done(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         发送任务完成播报。
 
         核心入参:
             text: 完成结果摘要。
             wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
-            返回 Runtime JSON 响应。
+            返回 Runtime JSON 响应，默认映射为 done/clear_pending_then_enqueue。
 
         边界异常:
             同 say。
         """
 
-        return await self.say(text, event="done", wait=wait)
+        # [旧逻辑已废弃]: 旧版 done 只是 event="done" + action="enqueue"，会让完成提示排在过期 progress 后面。
+        # 新策略把完成播报作为自然收尾，清理待播旧消息后再入队当前完成摘要。
+        return await self._say_with_policy(
+            "done",
+            text,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
 
-    async def error(self, text: str, *, wait: bool = False) -> dict[str, Any]:
+    async def error(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         发送错误播报。
 
         核心入参:
             text: 错误摘要。
             wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
-            返回 Runtime JSON 响应。
+            返回 Runtime JSON 响应；本方法仍保持原始语义事件，不隐式打断。
 
         边界异常:
             同 say。
         """
 
         # error 只是语义标签，不隐式打断队列；调用方需要打断时应显式使用 interrupt(...)。
-        return await self.say(text, event="error", wait=wait)
+        return await self.say(
+            text,
+            event="error",
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
 
-    async def interrupt(self, text: str, *, wait: bool = False) -> dict[str, Any]:
+    async def interrupt(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         发送打断播报。
 
         核心入参:
             text: 打断时需要立即说出的内容。
             wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
             返回 Runtime JSON 响应。
@@ -151,7 +347,17 @@ class VoiceClient:
             同 say。
         """
 
-        return await self.say(text, event="interrupt", priority="high", action="interrupt", interrupt=True, wait=wait)
+        return await self.say(
+            text,
+            event="interrupt",
+            priority="high",
+            action="interrupt",
+            interrupt=True,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
 
     async def stop(self) -> dict[str, Any]:
         """

@@ -83,18 +83,107 @@ def _build_metadata(role_name: str | None, streamvox_json: str | None) -> dict[s
     return metadata
 
 
+def _select_high_level_intent(
+    info_text: str | None,
+    progress_text: str | None,
+    urgent_text: str | None,
+    done_text: str | None,
+) -> tuple[str, str] | None:
+    """
+    从 CLI 高层策略选项中解析唯一意图。
+
+    核心入参:
+        info_text: --info 提供的普通说明文本。
+        progress_text: --progress 提供的可覆盖进度文本。
+        urgent_text: --urgent 提供的紧急插播文本。
+        done_text: --done 提供的完成收尾文本。
+
+    预期输出:
+        没有高层选项时返回 None；有且仅有一个高层选项时返回 (intent, text)。
+
+    边界异常:
+        同时传入多个高层选项时抛出 typer.BadParameter，避免 CLI 产生含混队列行为。
+    """
+
+    # 关键变量：candidates 只收集用户实际选择的高层意图，后续用于互斥校验。
+    candidates = [
+        ("info", info_text),
+        ("progress", progress_text),
+        ("urgent", urgent_text),
+        ("done", done_text),
+    ]
+
+    # 只保留非空文本，业务意图是让空字符串和未提供一样不触发高层策略。
+    selected = [(intent, value) for intent, value in candidates if value is not None]
+    if not selected:
+        return None
+
+    # 高层策略选项必须互斥，因为每个意图都有不同队列控制动作，混用会让最终语义不可解释。
+    if len(selected) > 1:
+        raise typer.BadParameter("only one of --info/--progress/--urgent/--done can be used")
+
+    intent, value = selected[0]
+    if value is None or not value.strip():
+        raise typer.BadParameter(f"--{intent} text must not be empty")
+    return intent, value
+
+
+def _ensure_raw_controls_are_not_mixed_with_policy(
+    *,
+    text: str | None,
+    event: str,
+    priority: str,
+    action: str,
+    interrupt_text: str | None,
+    stop: bool,
+    interrupt_current: bool,
+) -> None:
+    """
+    校验高层策略入口没有混用底层控制参数。
+
+    核心入参:
+        text/event/priority/action/interrupt_text/stop/interrupt_current: CLI 原始协议参数。
+
+    预期输出:
+        参数组合清晰时无返回值。
+
+    边界异常:
+        高层策略和底层控制入口混用时抛出 typer.BadParameter，避免 Agent 误以为底层参数仍会生效。
+    """
+
+    # 高层策略文本由 --info/--progress/--urgent/--done 承载，位置参数再传文本会产生双文本歧义。
+    if text is not None:
+        raise typer.BadParameter("TEXT argument cannot be used together with --info/--progress/--urgent/--done")
+
+    # 高层策略已经固定 event/priority/action，业务意图是阻止调用方绕过策略层直接改底层动作。
+    if event != "progress" or priority != "normal" or action != "enqueue":
+        raise typer.BadParameter("--event/--priority/--action cannot be combined with high-level policy options")
+
+    # stop 和 interrupt 是独立控制入口，不能和高层播报意图混用。
+    if stop or interrupt_text is not None or interrupt_current:
+        raise typer.BadParameter("--stop/--interrupt/--interrupt-current cannot be combined with high-level policy options")
+
+
 @app.callback()
 def send(
     text: Optional[str] = typer.Argument(None, help="Text to speak."),
     event: str = typer.Option("progress", "--event", help="Event type: started/progress/done/error/interrupt/stop."),
-    priority: str = typer.Option("normal", "--priority", help="Queue priority: low/normal/high."),
+    priority: str = typer.Option("normal", "--priority", help="Queue priority: low/normal/high."), # 预设字段，还没开发
     action: str = typer.Option(
-        "enqueue",
+        "enqueue", # 默认入队
         "--action",
         help="Queue action: enqueue/interrupt/stop/replace_pending/clear_pending_then_enqueue.",
     ),
     interrupt_text: Optional[str] = typer.Option(None, "--interrupt", help="Interrupt current speech and say this text."),
     stop: bool = typer.Option(False, "--stop", help="Stop current speech without shutting down Runtime."),
+    info_text: Optional[str] = typer.Option(None, "--info", help="Speak normal information using the high-level policy."),
+    progress_text: Optional[str] = typer.Option(
+        None,
+        "--progress",
+        help="Speak progress using replace_pending high-level policy.",
+    ),
+    urgent_text: Optional[str] = typer.Option(None, "--urgent", help="Speak urgent text using interrupt policy."),
+    done_text: Optional[str] = typer.Option(None, "--done", help="Speak done text using finalization policy."),
     wait: bool = typer.Option(False, "--wait", help="Wait until this event is completed."),
     role_name: Optional[str] = typer.Option(
         None,
@@ -119,7 +208,7 @@ def send(
     向 Runtime 发送语音事件。
 
     核心入参:
-        text/event/priority/action/interrupt_text/stop/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
+        text/event/priority/action/interrupt_text/stop/info_text/progress_text/urgent_text/done_text/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
 
     预期输出:
         stdout 输出 Runtime 响应 JSON；默认投递后快速返回。
@@ -130,6 +219,30 @@ def send(
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
     metadata = _build_metadata(role_name, streamvox_json)
+    high_level_intent = _select_high_level_intent(info_text, progress_text, urgent_text, done_text)
+
+    # 高层策略入口优先处理，并拒绝混用底层控制参数，业务意图是给 Agent 一个稳定、少分支的调用面。
+    if high_level_intent is not None:
+        _ensure_raw_controls_are_not_mixed_with_policy(
+            text=text,
+            event=event,
+            priority=priority,
+            action=action,
+            interrupt_text=interrupt_text,
+            stop=stop,
+            interrupt_current=interrupt_current,
+        )
+        intent, policy_text = high_level_intent
+        _print_json(
+            asyncio.run(
+                getattr(client, intent)(
+                    policy_text,
+                    wait=wait,
+                    metadata=metadata or None,
+                )
+            )
+        )
+        return
 
     # stop 是纯控制指令，不需要文本，也不应该被 event 参数干扰。
     if stop:
@@ -179,7 +292,7 @@ def send(
                 text,
                 event=event,
                 priority=priority,
-                action="interrupt" if interrupt_current else action,
+                action="interrupt" if interrupt_current else action, # 默认action是enqueue
                 interrupt=interrupt_current,
                 wait=wait,
                 metadata=metadata or None,

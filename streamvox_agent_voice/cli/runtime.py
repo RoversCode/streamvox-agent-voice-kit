@@ -218,7 +218,7 @@ def start(
     shutdown_guard.install()
 
     try:
-        asyncio.run(server.serve())
+        asyncio.run(server.serve()) # 创建了一个事件循环，开始跑
     except KeyboardInterrupt as exc:
         shutdown_guard.shutdown_for_exception()
         raise typer.Exit(code=130) from exc

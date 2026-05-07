@@ -253,7 +253,7 @@ class VoiceEventQueue:
 
         while True:
             item = await self._next_item()
-            await self._process_item(item)
+            await self._process_item(item)  # 消费
 
     async def _next_item(self) -> QueueItem:
         """
@@ -271,7 +271,7 @@ class VoiceEventQueue:
 
         async with self._condition:
             while not self._pending:
-                await self._condition.wait()
+                await self._condition.wait()  # 等待被唤醒
             return self._pending.popleft()
 
     async def _process_item(self, item: QueueItem) -> None:
@@ -328,7 +328,7 @@ class VoiceEventQueue:
         """
 
         if not item.future.done():
-            item.future.set_result(result)
+            item.future.set_result(result) # 任务做好了，设置结果
 
     def _request_current_stop(self) -> None:
         """
@@ -367,6 +367,9 @@ class VoiceEventQueue:
     def _drop_pending_by_event(self, event: str, detail: str) -> None:
         """
         清理等待队列中同语义类型的事件。
+        比如 Agent 先说“正在检索代码”，紧接着又产生“已经定位到 queue 实现”，
+        再下一秒是“正在验证调用链”。这几条如果全播，用户听到的是过时过程；
+        更合理的是当前正在播的保留，尚未播出的旧 progress 全丢掉，只播最新状态。
 
         核心入参:
             event: 需要被替换的事件语义标签。

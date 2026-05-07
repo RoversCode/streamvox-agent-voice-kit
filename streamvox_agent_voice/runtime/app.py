@@ -78,7 +78,7 @@ def create_app(
         边界异常:
             模型加载失败会阻止 Runtime 启动；shutdown 异常会进入 uvicorn 日志。
         """
-
+        # 当前已经存在的 asyncio 事件循环里，把一个普通同步函数 runtime_speaker.initialize，扔到线程池里的某个工作线程执行
         await asyncio.to_thread(runtime_speaker.initialize)
         await queue.start()
         try:
@@ -87,6 +87,7 @@ def create_app(
             await queue.shutdown()
             await asyncio.to_thread(runtime_speaker.shutdown)
 
+    # lifespan -> TTSEngine初始化
     app = FastAPI(title="StreamVox Agent Voice Runtime", version="0.1.0", lifespan=lifespan)
 
     # 把运行时对象挂到 app.state，避免全局变量导致测试之间互相污染。
@@ -374,6 +375,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         try:
+            # 验证参数是否合法
             await asyncio.to_thread(runtime_speaker.validate_event_request, event)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -381,6 +383,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         try:
+            # 入轨
             item = await queue.enqueue(event)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
