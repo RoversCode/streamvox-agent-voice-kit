@@ -6,9 +6,11 @@ import asyncio
 import json
 from typing import Optional
 
+import httpx
 import typer
 
 from ..client import VoiceClient
+from .json_options import parse_json_object_option
 
 
 app = typer.Typer(help="Send speech events to the local StreamVox Runtime.", invoke_without_command=True)
@@ -49,7 +51,11 @@ def _print_json(payload: dict[str, object]) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _build_metadata(role_name: str | None, streamvox_json: str | None) -> dict[str, object]:
+def _build_metadata(
+    role_name: str | None,
+    streamvox_json: str | None,
+    streamvox_json_file: str | None,
+) -> dict[str, object]:
     """
     组装事件级 metadata。
 
@@ -68,18 +74,16 @@ def _build_metadata(role_name: str | None, streamvox_json: str | None) -> dict[s
     if role_name is not None:
         metadata["role_name"] = role_name
 
-    if streamvox_json is None:
+    streamvox_payload = parse_json_object_option(
+        raw_value=streamvox_json,
+        raw_option_name="--streamvox-json",
+        file_path=streamvox_json_file,
+        file_option_name="--streamvox-json-file",
+    )
+    if not streamvox_payload:
         return metadata
 
-    try:
-        payload = json.loads(streamvox_json)
-    except json.JSONDecodeError as exc:
-        raise typer.BadParameter(f"--streamvox-json must be valid JSON: {exc}") from exc
-
-    if not isinstance(payload, dict):
-        raise typer.BadParameter("--streamvox-json must decode to a JSON object")
-
-    metadata["streamvox"] = payload
+    metadata["streamvox"] = streamvox_payload
     return metadata
 
 
@@ -163,6 +167,54 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
         raise typer.BadParameter("--stop/--interrupt/--interrupt-current cannot be combined with high-level policy options")
 
 
+def _run_client_request(coroutine: object) -> dict[str, object]:
+    """
+    执行一次 Runtime HTTP 请求，并把服务端错误转换成可读 CLI 输出。
+
+    核心入参:
+        coroutine: `VoiceClient` 返回的协程对象。
+    预期输出:
+        成功时返回 Runtime 的 JSON 响应。
+    边界异常:
+        Runtime 返回非 2xx 时，输出服务端 `detail` 并以非零状态退出。
+    """
+
+    try:
+        return asyncio.run(coroutine)  # type: ignore[arg-type]
+    except httpx.HTTPStatusError as exc:
+        # 这里优先透传 Runtime 的 detail，避免 Agent 只能看到不带上下文的通用 HTTPStatusError。
+        typer.echo(_format_http_status_error(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _format_http_status_error(exc: httpx.HTTPStatusError) -> str:
+    """
+    把 HTTPStatusError 格式化为更适合 CLI 的错误文本。
+
+    核心入参:
+        exc: `httpx` 抛出的 HTTP 状态异常。
+    预期输出:
+        返回包含状态码与服务端 detail 的短文本。
+    边界异常:
+        响应体不是 JSON 时回退到纯文本或原始异常消息。
+    """
+
+    detail = ""
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        raw_detail = payload.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail.strip()
+
+    if not detail:
+        detail = exc.response.text.strip() or str(exc)
+    return f"Runtime request failed ({exc.response.status_code}): {detail}"
+
+
 @app.callback()
 def send(
     text: Optional[str] = typer.Argument(None, help="Text to speak."),
@@ -193,6 +245,11 @@ def send(
         "--streamvox-json",
         help="JSON object forwarded to metadata.streamvox for model-specific stream kwargs.",
     ),
+    streamvox_json_file: Optional[str] = typer.Option(
+        None,
+        "--streamvox-json-file",
+        help="Path to a JSON object file forwarded to metadata.streamvox for model-specific stream kwargs.",
+    ),
     interrupt_current: bool = typer.Option(
         False,
         "--interrupt-current",
@@ -216,7 +273,7 @@ def send(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    metadata = _build_metadata(role_name, streamvox_json)
+    metadata = _build_metadata(role_name, streamvox_json, streamvox_json_file)
     high_level_intent = _select_high_level_intent(info_text, progress_text, urgent_text, done_text)
 
     # 高层策略入口优先处理，并拒绝混用底层控制参数，业务意图是给 Agent 一个稳定、少分支的调用面。
@@ -231,7 +288,7 @@ def send(
         )
         intent, policy_text = high_level_intent
         _print_json(
-            asyncio.run(
+            _run_client_request(
                 getattr(client, intent)(
                     policy_text,
                     wait=wait,
@@ -243,13 +300,13 @@ def send(
 
     # stop 是纯控制指令，不需要文本，也不应该被 event 参数干扰。
     if stop:
-        _print_json(asyncio.run(client.stop()))
+        _print_json(_run_client_request(client.stop()))
         return
 
     # --interrupt "文本" 是显式控制入口，固定使用 VoiceClient.interrupt，不依赖 event 标签推导控制行为。
     if interrupt_text is not None:
         _print_json(
-            asyncio.run(
+            _run_client_request(
                 client.interrupt(
                     interrupt_text,
                     wait=wait,
@@ -262,7 +319,7 @@ def send(
     # action=stop 是协议级控制入口，不需要文本，便于脚本通过 /events 统一发送控制事件。
     if action == "stop":
         _print_json(
-            asyncio.run(
+            _run_client_request(
                 client.say(
                     text or "",
                     event=event,
@@ -279,7 +336,7 @@ def send(
         raise typer.BadParameter("text is required unless --stop or --interrupt is used")
 
     _print_json(
-        asyncio.run(
+        _run_client_request(
             client.say(
                 text,
                 event=event,

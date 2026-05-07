@@ -274,6 +274,53 @@ class ModelControlProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelAgentGuidance:
+    """
+    描述面向 Agent 的模型选型与调用建议。
+
+    核心入参:
+        best_for: 该模型最适合承担的任务列表。
+        recommended_workflows: 推荐的接入工作流与调用路径。
+        recommended_parameters: 建议 Agent 优先关注的参数名列表。
+        parameter_notes: 参数级说明，帮助 Agent 理解何时该传、何时不该传。
+        text_writing_tips: 写提示文本与生成文本时的高价值经验。
+        known_constraints: 当前模型在 Runtime 公开能力下必须遵守的关键约束。
+    预期输出:
+        `to_payload` 返回可直接暴露给 CLI、HTTP 与文档层的建议字典。
+    边界异常:
+        本数据类不做额外校验，内容正确性由模型注册表维护者负责。
+    """
+
+    best_for: tuple[str, ...]
+    recommended_workflows: tuple[str, ...]
+    recommended_parameters: tuple[str, ...]
+    parameter_notes: dict[str, str]
+    text_writing_tips: tuple[str, ...]
+    known_constraints: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, Any]:
+        """
+        转换为公开 JSON 字典。
+
+        核心入参:
+            本方法不接收参数。
+        预期输出:
+            返回 Agent 选型与调用建议的可序列化字典。
+        边界异常:
+            不抛异常。
+        """
+
+        return {
+            "best_for": list(self.best_for),
+            "recommended_workflows": list(self.recommended_workflows),
+            "recommended_parameters": list(self.recommended_parameters),
+            "parameter_notes": dict(self.parameter_notes),
+            "text_writing_tips": list(self.text_writing_tips),
+            "known_constraints": list(self.known_constraints),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ModelProfile:
     """
     描述一个 StreamVox 模型在 Agent Voice Runtime 中公开支持的能力。
@@ -301,6 +348,7 @@ class ModelProfile:
     hardware: ModelHardwareProfile
     prompt: ModelPromptProfile
     controls: ModelControlProfile
+    guidance: ModelAgentGuidance
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -324,6 +372,7 @@ class ModelProfile:
             "hardware": self.hardware.to_payload(),
             "prompt": self.prompt.to_payload(),
             "controls": self.controls.to_payload(),
+            **self.guidance.to_payload(),
         }
 
     def validate_role_registration_request(
@@ -677,6 +726,39 @@ _MODEL_PROFILES: dict[str, ModelProfile] = {
             speaker_tags=False,
             inline_tags=False,
         ),
+        guidance=ModelAgentGuidance(
+            best_for=(
+                "硬件受限时的实时助手播报",
+                "低资源单参考音色克隆",
+                "轻量级私人助手语音",
+                "在高表达模型不可用时的回退方案",
+            ),
+            recommended_workflows=(
+                "先判断机器是否跑不动 s2-pro 或 voxcpm2，只有在更高表达模型不适合时再回退到 Qwen3 0.6B。",
+                "先注册单参考角色，再通过 role_name 复用音色。",
+                "正式播报时只需要优先关注 language、stream 和 icl。",
+            ),
+            recommended_parameters=(
+                "language",
+                "stream",
+                "icl",
+            ),
+            parameter_notes={
+                "language": "目标文本语言明确时应显式传入，例如 Chinese 或 English；只有混合语种或无法判断时再考虑 auto。",
+                "stream": "对私人智能助手场景通常直接开启即可，实时反馈比整段离线生成更重要。",
+                "icl": "icl=True 会更强调音色相似度，但大多数 Agent Voice 场景里仅开启 stream 通常就够用。",
+            },
+            text_writing_tips=(
+                "直接写干净、自然、口语化的目标语言正文。",
+                "Qwen3 的优势是稳和轻，不是强情感表演，因此不要堆复杂风格提示词。",
+                "如果文本语言明确，不要让模型再猜语言。",
+            ),
+            known_constraints=(
+                "当前 Runtime 只公开单参考角色工作流，不公开多参考角色注册。",
+                "不支持 control_text、speaker tags 或内联风格标签控制。",
+                "如果硬件足够并且追求更强情感与拟人性，应优先考虑 s2-pro 或 voxcpm2。",
+            ),
+        ),
     ),
     "qwen3-tts-clone-1.7b-gguf": ModelProfile(
         name="qwen3-tts-clone-1.7b-gguf",
@@ -710,6 +792,39 @@ _MODEL_PROFILES: dict[str, ModelProfile] = {
             remove_meaningless_chars=True,
             speaker_tags=False,
             inline_tags=False,
+        ),
+        guidance=ModelAgentGuidance(
+            best_for=(
+                "硬件允许时更好的 Qwen3 回退方案",
+                "更自然的单参考克隆",
+                "效果优于 0.6B 的私人助手播报",
+                "在高表达模型不可用时的质量优先回退方案",
+            ),
+            recommended_workflows=(
+                "只要机器能跑得动 1.7B，就优先它而不是 0.6B；两者主要区别只是参数量和效果。",
+                "如果 s2-pro 和 voxcpm2 不适合当前硬件或实时性要求，再回退到 Qwen3 1.7B。",
+                "正式播报时只需要优先关注 language、stream 和 icl。",
+            ),
+            recommended_parameters=(
+                "language",
+                "stream",
+                "icl",
+            ),
+            parameter_notes={
+                "language": "正式生成场景应尽量显式指定语言，尤其是整句中文、英文或日文时。",
+                "stream": "对私人智能助手场景通常直接开启即可，实时反馈通常比整段等待更重要。",
+                "icl": "icl=True 会更强调音色相似度，但大多数 Agent Voice 场景里并不需要频繁显式调它。",
+            },
+            text_writing_tips=(
+                "正文优先自然、完整、明确，避免机械通知口吻。",
+                "Qwen3 1.7B 主要是比 0.6B 更好一些，不要把它当成副语言控制模型。",
+                "混合语言文本才优先考虑 auto，单语言文本请直接指定 language。",
+            ),
+            known_constraints=(
+                "当前 Runtime 只公开单参考角色工作流，不公开多参考角色注册。",
+                "不支持 control_text、speaker tags 或内联风格标签控制。",
+                "如果硬件足够并且追求更强情感与拟人性，应优先考虑 s2-pro 或 voxcpm2。",
+            ),
         ),
     ),
     "s2-pro-4b-gguf": ModelProfile(
@@ -745,6 +860,32 @@ _MODEL_PROFILES: dict[str, ModelProfile] = {
             speaker_tags=True,
             inline_tags=True,
         ),
+        guidance=ModelAgentGuidance(
+            best_for=(
+                "私人智能助手的强情感表达",
+                "更高拟人感的单人助手播报",
+                "硬件足够时的高优先级模型选择",
+                "通过推理文本而不是调参来优化表现",
+            ),
+            recommended_workflows=(
+                "先判断硬件是否能满足显存、内存和实时性要求；满足时优先考虑 S2-Pro。",
+                "在 Agent Voice 场景里不要把多人对话和多参考当成主路径，而要把重点放在单人助手语气上。",
+                "真正需要 Agent 关注的是推理文本，以及是否要直接写一个显式内联风格标签，而不是一堆参数。",
+            ),
+            recommended_parameters=(),
+            parameter_notes={},
+            text_writing_tips=(
+                "先把句子改写得像真人在说，再考虑是否要轻量加一点风格控制。",
+                "如果已经知道要的语气或情绪，优先直接写显式 [tag]；这类标签通常比模糊描述更容易被稳定遵守。",
+                "风格控制要少而准，不要写成长篇复杂人物设定，也不要在一句话里叠太多标签。",
+                "多人对话、speaker tags 和多参考不是 Agent Voice 这里的主重点。",
+            ),
+            known_constraints=(
+                "底层模型虽然有多人对话和多参考能力，但当前 Agent Voice 主场景并不依赖这些能力。",
+                "当前 Runtime 只公开单参考角色注册工作流。",
+                "真正影响效果的重点不在参数，而在推理文本和显式内联风格控制。",
+            ),
+        ),
     ),
     "voxcpm2-gguf": ModelProfile(
         name="voxcpm2-gguf",
@@ -778,6 +919,35 @@ _MODEL_PROFILES: dict[str, ModelProfile] = {
             remove_meaningless_chars=False,
             speaker_tags=False,
             inline_tags=True,
+        ),
+        guidance=ModelAgentGuidance(
+            best_for=(
+                "私人智能助手的副语言表达",
+                "参考音色基础上的拟人化播报",
+                "硬件满足时的高优先级模型选择",
+                "通过方言、副语言标签和轻量控制增强真人感",
+            ),
+            recommended_workflows=(
+                "先判断硬件是否满足显存、内存和实时性要求；满足时应优先在 voxcpm2 和 s2-pro 之间选。",
+                "对私人智能助手，最常用的是 mode=ref；mode=text 在这里几乎不是主路径。",
+                "如果追求最高音色相似度，优先 ref_continuation；否则优先 continuation。",
+            ),
+            recommended_parameters=(
+                "mode",
+            ),
+            parameter_notes={
+                "mode": "决定当前到底走 ref、continuation 还是 ref_continuation 工作流；在 Agent Voice 主场景里，mode 比其他参数都更重要。",
+            },
+            text_writing_tips=(
+                "mode=ref 下如果使用 control_text，一定要尽量简单，否则前后音色更容易漂。",
+                "要做方言时，最好直接把正文改写成更地道的方言说法，而不是只写一个方言名。",
+                "像 [laughing]、[sigh]、[Uhm]、[Shh] 这类副语言标签要少而准，一句话里不要叠太多。",
+            ),
+            known_constraints=(
+                "ref、continuation、ref_continuation 模式必须命中已持久化的 role_name。",
+                "ref 才有 control_text 能力；continuation 和 ref_continuation 没有 control_text，但仍然有副语言能力。",
+                "为了尽量固定音色，推理时应固定 seed，而不要完全依赖内部随机。",
+            ),
         ),
     ),
 }
@@ -847,6 +1017,18 @@ def build_capability_snapshot(config: RuntimeConfig) -> dict[str, Any]:
 
     profile = resolve_model_profile(config.model)
     controls = profile.controls.to_payload() if profile is not None else None
+    guidance = (
+        profile.guidance.to_payload()
+        if profile is not None
+        else {
+            "best_for": [],
+            "recommended_workflows": [],
+            "recommended_parameters": [],
+            "parameter_notes": {},
+            "text_writing_tips": [],
+            "known_constraints": [],
+        }
+    )
     return {
         "requested_model": config.model,
         "resolved_model": profile.name if profile is not None else None,
@@ -857,6 +1039,7 @@ def build_capability_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         "hardware": profile.hardware.to_payload() if profile is not None else None,
         "prompt": profile.prompt.to_payload() if profile is not None else None,
         "controls": controls,
+        **guidance,
         # 关键字段：session 用来表达当前 Runtime 会话级默认能力，而不是静态模型文档。
         "session": {
             "default_role_name": config.default_role_name,

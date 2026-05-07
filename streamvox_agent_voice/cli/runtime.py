@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 import typer
 import uvicorn
 
@@ -20,6 +21,8 @@ from ..runtime import (
     recommend_model_profiles,
     resolve_model_profile,
 )
+from .json_options import parse_json_object_option
+from .runtime_probe import build_benchmark_summary, run_runtime_benchmark, run_runtime_selftest
 from .runtime_supervisor import RuntimeShutdownGuard, is_runtime_child_process, run_supervised_start
 
 
@@ -139,6 +142,75 @@ def _parse_audio_data_source(audio_data_json: str | None, audio_data_file: str |
     return normalized_audio_data
 
 
+def _run_client_request(coroutine: object) -> dict[str, object]:
+    """
+    执行一次 Runtime HTTP 请求，并把服务端错误转换成可读 CLI 输出。
+
+    核心入参:
+        coroutine: `VoiceClient` 返回的协程对象。
+    预期输出:
+        成功时返回 Runtime 的 JSON 响应。
+    边界异常:
+        Runtime 返回非 2xx 时，输出服务端 `detail` 并以非零状态退出。
+    """
+
+    try:
+        return asyncio.run(coroutine)  # type: ignore[arg-type]
+    except httpx.HTTPStatusError as exc:
+        # 这里优先把服务端 detail 打出来，方便人类和 Agent 都能基于明确原因做恢复。
+        typer.echo(_format_http_status_error(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    except httpx.HTTPError as exc:
+        typer.echo(_format_transport_error(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _format_http_status_error(exc: httpx.HTTPStatusError) -> str:
+    """
+    把 HTTPStatusError 格式化为更适合 CLI 的错误文本。
+
+    核心入参:
+        exc: `httpx` 抛出的 HTTP 状态异常。
+    预期输出:
+        返回包含状态码与服务端 detail 的短文本。
+    边界异常:
+        响应体不是 JSON 时回退到纯文本或原始异常消息。
+    """
+
+    detail = ""
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        raw_detail = payload.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail.strip()
+
+    if not detail:
+        detail = exc.response.text.strip() or str(exc)
+    return f"Runtime request failed ({exc.response.status_code}): {detail}"
+
+
+def _format_transport_error(exc: httpx.HTTPError) -> str:
+    """
+    鎶?HTTP 杩炴帴绫婚敊璇敹鏁涗负鍙鐨?CLI 鎻愮ず銆?
+    鏍稿績鍏ュ弬:
+        exc: `httpx` 鎶涘嚭鐨勭綉缁溿€佽秴鏃舵垨杩炴帴绫诲紓甯搞€?
+    棰勬湡杈撳嚭:
+        杩斿洖涓€鏉＄煭閿欒锛屾彁绀?Runtime 鍦板潃銆佽姹傜被鍨嬫垨鍙兘鐨勮繛鎺ラ棶棰樸€?
+    杈圭晫寮傚父:
+        涓嶄緷璧栧紓甯镐竴瀹氬甫鏈?request/url锛岀己澶辨椂鍥為€€鍒板師濮嬫秷鎭€?
+    """
+
+    request = getattr(exc, "request", None)
+    url = getattr(request, "url", None)
+    if url is not None:
+        return f"Runtime request failed: {exc.__class__.__name__} while contacting {url}"
+    return f"Runtime request failed: {exc}"
+
+
 @app.command()
 def start(
     model: str = typer.Option("voxcpm2-gguf", "--model", help="StreamVox model name or local bundle path."),
@@ -249,7 +321,7 @@ def status(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.status()))
+    _print_json(_run_client_request(client.status()))
 
 
 @app.command()
@@ -272,7 +344,116 @@ def capabilities(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.capabilities()))
+    _print_json(_run_client_request(client.capabilities()))
+
+
+@app.command()
+def selftest(
+    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
+    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
+    timeout: float = typer.Option(60.0, "--timeout", help="HTTP request timeout seconds."),
+    role_name: Optional[str] = typer.Option(
+        None,
+        "--role-name",
+        help="Optional persisted role name used by the speech checks.",
+    ),
+    progress_text: str = typer.Option(
+        "Runtime 自检：正在验证播报链路。",
+        "--progress-text",
+        help="Progress text used during speech-enabled selftest.",
+    ),
+    done_text: str = typer.Option(
+        "Runtime 自检：播报链路验证完成。",
+        "--done-text",
+        help="Done text used during speech-enabled selftest.",
+    ),
+    speak: bool = typer.Option(
+        True,
+        "--speak/--no-speak",
+        help="Whether to send progress and done events during selftest.",
+    ),
+) -> None:
+    """
+    鎵ц瀹夎鍚庣殑鏈€灏忚嚜妫€锛岀敤浜庨獙璇?Runtime 鍜屾挱鎶ラ摼璺槸鍚︽墦閫氥€?
+    鏍稿績鍏ュ弬:
+        host/port/timeout: Runtime 鍦板潃涓庤姹傝秴鏃躲€?
+        role_name: 鍙€夋寔涔呭寲瑙掕壊鍚嶏紝閬垮厤渚濊禆浼氳瘽榛樿瑙掕壊銆?
+        progress_text/done_text: 鑷鏈熼棿鐨勬挱鎶ユ枃鏈€?
+        speak: 鏄惁鐪熸鍙戦€佹挱鎶ヤ簨浠躲€?
+    棰勬湡杈撳嚭:
+        stdout 杈撳嚭鍖呭惈 `status`銆乣capabilities`銆乣roles list` 鍜屽彲閫夋挱鎶ラ獙璇佺殑 JSON 鎶ュ憡銆?
+    杈圭晫寮傚父:
+        Runtime 涓嶅彲杈炬垨鎾姤鏈夋晥鎬ч獙璇佸け璐ユ椂锛岄潪闆堕€€鍑哄苟鎵撳嵃鍙閿欒銆?
+    """
+
+    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
+    _print_json(
+        _run_client_request(
+            run_runtime_selftest(
+                client,
+                progress_text=progress_text,
+                done_text=done_text,
+                role_name=role_name,
+                include_speech=speak,
+            )
+        )
+    )
+
+
+@app.command()
+def benchmark(
+    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
+    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
+    timeout: float = typer.Option(120.0, "--timeout", help="HTTP request timeout seconds."),
+    role_name: Optional[str] = typer.Option(
+        None,
+        "--role-name",
+        help="Optional persisted role name used by the benchmark speech requests.",
+    ),
+    text: str = typer.Option(
+        "您好，我正在整理答案，请稍等片刻。",
+        "--text",
+        help="Benchmark text used to measure end-to-end completion latency.",
+    ),
+    iterations: int = typer.Option(
+        1,
+        "--iterations",
+        min=1,
+        max=10,
+        help="How many completed speech runs to measure. Larger values are slower and more audible.",
+    ),
+    json_summary_only: bool = typer.Option(
+        False,
+        "--json-summary-only",
+        help="Only print the compact machine-friendly benchmark summary JSON.",
+    ),
+) -> None:
+    """
+    鎵ц闈㈠悜 Agent 鐨勮交閲忓熀鍑嗘祴璇曪紝缁欏嚭鏄惁閫傚悎瀹炴椂鎾姤鐨勫惎鍙戝紡鍒ゆ柇銆?
+    鏍稿績鍏ュ弬:
+        host/port/timeout: Runtime 鍦板潃涓庤姹傝秴鏃躲€?
+        role_name: 鍙€夋寔涔呭寲瑙掕壊鍚嶃€?
+        text: 鐢ㄤ簬鍩哄噯娴嬭瘯鐨勬挱鎶ユ枃鏈€?
+        iterations: 鍙嶅娴嬭瘯娆℃暟锛岀敤浜庨檷浣庡崟娆℃姈鍔ㄧ殑褰卞搷銆?
+    棰勬湡杈撳嚭:
+        stdout 杈撳嚭鎺ュ彛寰€杩斿欢杩熴€佹挱鎶ュ畬鎴愯€楁椂銆佷及绠楄闊虫椂闀垮拰瀹炴椂鎬у垽瀹氱粨鏋溿€?
+    杈圭晫寮傚父:
+        杩欐槸鍚彂寮忔祴璇曪紝涓嶆槸搴曞眰澹板鐪熷€煎熀鍑嗭紱Runtime 涓嶅彲杈炬椂浼氶潪闆堕€€鍑恒€?
+    """
+
+    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
+    benchmark_report = _run_client_request(
+        run_runtime_benchmark(
+            client,
+            text=text,
+            role_name=role_name,
+            iterations=iterations,
+        )
+    )
+    if json_summary_only:
+        _print_json(build_benchmark_summary(benchmark_report))
+        return
+    _print_json(benchmark_report)
 
 
 @app.command()
@@ -295,7 +476,7 @@ def stop(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.shutdown()))
+    _print_json(_run_client_request(client.shutdown()))
 
 
 @models_app.command("list")
@@ -405,7 +586,7 @@ def roles_list(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.list_roles()))
+    _print_json(_run_client_request(client.list_roles()))
 
 
 @roles_app.command("register")
@@ -447,6 +628,11 @@ def roles_register(
         "--streamvox-json",
         help="JSON object forwarded to TTSEngine.make_prompt as model-specific kwargs.",
     ),
+    streamvox_json_file: Optional[str] = typer.Option(
+        None,
+        "--streamvox-json-file",
+        help="Path to a JSON object file forwarded to TTSEngine.make_prompt as model-specific kwargs.",
+    ),
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP request timeout seconds."),
@@ -481,10 +667,15 @@ def roles_register(
         raise typer.BadParameter("--sample-rate is only valid with --audio-data-json or --audio-data-file")
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    streamvox = _parse_json_object(streamvox_json, option_name="--streamvox-json") or None
+    streamvox = parse_json_object_option(
+        raw_value=streamvox_json,
+        raw_option_name="--streamvox-json",
+        file_path=streamvox_json_file,
+        file_option_name="--streamvox-json-file",
+    ) or None
     if audio_file is not None:
         _print_json(
-            asyncio.run(
+            _run_client_request(
                 client.register_role_upload(
                     role_name=role_name,
                     audio_file=audio_file,
@@ -497,7 +688,7 @@ def roles_register(
         return
 
     _print_json(
-        asyncio.run(
+        _run_client_request(
             client.register_role(
                 role_name=role_name,
                 audio_path=audio_path,
@@ -537,7 +728,7 @@ def roles_delete(
         payload = role_names[0]
     else:
         payload = role_names
-    _print_json(asyncio.run(client.delete_roles(payload)))
+    _print_json(_run_client_request(client.delete_roles(payload)))
 
 
 @roles_app.command("set-default")
@@ -561,7 +752,7 @@ def roles_set_default(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.set_default_role(role_name)))
+    _print_json(_run_client_request(client.set_default_role(role_name)))
 
 
 @roles_app.command("clear-default")
@@ -584,7 +775,7 @@ def roles_clear_default(
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(asyncio.run(client.set_default_role(None)))
+    _print_json(_run_client_request(client.set_default_role(None)))
 
 
 def main() -> None:

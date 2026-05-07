@@ -49,6 +49,7 @@ windows-cpu = [
 [project.scripts]
 streamvox-runtime = "streamvox_agent_voice.cli.runtime:main"
 streamvox-say = "streamvox_agent_voice.cli.say:main"
+streamvox-bootstrap = "streamvox_agent_voice.bootstrap:main"
 
 [build-system]
 requires = ["hatchling>=1.25.0"]
