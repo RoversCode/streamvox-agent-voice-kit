@@ -145,15 +145,16 @@ class VoiceEventQueue:
         loop = asyncio.get_running_loop()
         item = QueueItem(event=event, future=loop.create_future())
 
+        # 并发情况下，谁先拿到锁先进去，其他并发协程会在这里等待
         async with self._condition:
             # action 是控制语义；旧 interrupt=true 继续兼容为 interrupt action。
             action = self._effective_action(event)
             if action == "interrupt":
-                self._request_current_stop()
+                self._stop_event.set()
                 self._drop_all_pending("interrupted")
                 self._pending.appendleft(item)
             elif action == "stop":
-                self._request_current_stop()
+                self._stop_event.set()
                 self._drop_all_pending("stopped")
                 self._complete(item, QueueResult(status="stopped", event_id=item.event.id, detail="stop action requested"))
             elif action == "replace_pending":
@@ -162,7 +163,7 @@ class VoiceEventQueue:
             elif action == "clear_pending_then_enqueue":
                 self._drop_all_pending("cleared")
                 self._pending.append(item)
-            else:
+            else:  # action是enqueue， 入队。 
                 self._pending.append(item)
             self._condition.notify()
 
@@ -183,7 +184,7 @@ class VoiceEventQueue:
         """
 
         async with self._condition:
-            self._request_current_stop()
+            self._stop_event.set()
             self._drop_all_pending("stopped")
             self._condition.notify()
         return QueueResult(status="stopped", event_id="stop", detail="current playback stop requested")
@@ -203,13 +204,13 @@ class VoiceEventQueue:
         """
 
         self._closed = True
-        self._request_current_stop()
+        self._stop_event.set()
         self._drop_all_pending("runtime shutdown")
 
         if self._worker_task is None:
             return
 
-        self._worker_task.cancel()
+        self._worker_task.cancel() # 取消任务
         try:
             await self._worker_task
         except asyncio.CancelledError:
@@ -232,9 +233,9 @@ class VoiceEventQueue:
 
         return {
             "closed": self._closed,
-            "pending": len(self._pending),
+            "pending": len(self._pending), # 等待说话的队列
             "current": self._current.event.to_payload() if self._current is not None else None,
-            "current_event_id": self._current.event.id if self._current is not None else None,
+            "current_event_id": self._current.event.id if self._current is not None else None,  # event id
         }
 
     async def _run(self) -> None:
@@ -252,27 +253,13 @@ class VoiceEventQueue:
         """
 
         while True:
-            item = await self._next_item()
+            # 1. 锁内等待并获取任务，等待并取出下一条队列事件。
+            async with self._condition:
+                while not self._pending:
+                    # 外部执行 task.cancel() 时，会在此处抛出 CancelledError 并直接退出
+                    await self._condition.wait()  # TODO: 队列里没数据，这里会释放锁
+                item = self._pending.popleft()
             await self._process_item(item)  # 消费
-
-    async def _next_item(self) -> QueueItem:
-        """
-        等待并取出下一条队列事件。
-
-        核心入参:
-            本方法无入参。
-
-        预期输出:
-            返回下一条 QueueItem。
-
-        边界异常:
-            worker 被取消时 asyncio 会在 condition 等待处抛出 CancelledError。
-        """
-
-        async with self._condition:
-            while not self._pending:
-                await self._condition.wait()  # 等待被唤醒
-            return self._pending.popleft()
 
     async def _process_item(self, item: QueueItem) -> None:
         """
@@ -288,13 +275,13 @@ class VoiceEventQueue:
             speaker.speak 抛出的异常会转换为 failed 结果。
         """
 
-        self._current = item
+        self._current = item  # 当前正在处理的数据
         self._stop_event.clear()
 
         try:
             # stop 作为事件或 action 进入队列时不播报，只执行停止控制并返回。
             if item.event.event == "stop" or self._effective_action(item.event) == "stop":
-                self._request_current_stop()
+                self._stop_event.set()
                 self._complete(item, QueueResult(status="stopped", event_id=item.event.id))
                 return
 
@@ -313,51 +300,12 @@ class VoiceEventQueue:
             self._stop_event.clear()
 
     def _complete(self, item: QueueItem, result: QueueResult) -> None:
-        """
-        安全完成队列项 future。
-
-        核心入参:
-            item: 需要完成的队列项。
-            result: 处理结果。
-
-        预期输出:
-            item.future 被设置结果；如果 future 已完成则不重复设置。
-
-        边界异常:
-            不抛异常。
-        """
-
         if not item.future.done():
             item.future.set_result(result) # 任务做好了，设置结果
 
-    def _request_current_stop(self) -> None:
-        """
-        请求当前播放停止。
-
-        核心入参:
-            本方法无入参。
-
-        预期输出:
-            stop_event 被置位，播放线程会在下一个 chunk 边界停止。
-
-        边界异常:
-            不抛异常。
-        """
-
-        self._stop_event.set()
-
     def _drop_all_pending(self, detail: str) -> None:
         """
-        清理全部等待事件。
-
-        核心入参:
-            detail: 写入 QueueResult 的跳过原因。
-
-        预期输出:
-            所有等待事件 future 被标记 skipped。
-
-        边界异常:
-            不抛异常。
+        清理队列里全部等待事件。
         """
 
         while self._pending:
@@ -374,18 +322,12 @@ class VoiceEventQueue:
         核心入参:
             event: 需要被替换的事件语义标签。
             detail: 写入 QueueResult 的跳过原因。
-
-        预期输出:
-            等待队列中同 event 的未播放项被标记 skipped，其他事件保留顺序。
-
-        边界异常:
-            不抛异常。
         """
 
         kept: deque[QueueItem] = deque()
         while self._pending:
             item = self._pending.popleft()
-            if item.event.event == event:
+            if item.event.event == event:  # agent语义级别，而不是action，相同语义剔除，播报最新的
                 self._complete(item, QueueResult(status="skipped", event_id=item.event.id, detail=detail))
                 continue
             kept.append(item)

@@ -57,18 +57,26 @@ class RuntimeConfig:
             STREAMVOX_AGENT_VOICE_PORT 不是整数时会抛出 ValueError。
         """
 
+        # 关键变量：defaults 用实例默认值承接 dataclass 默认配置。
+        # 这里不能直接读取 cls.port / cls.model 等类属性，因为 slots dataclass
+        # 在类上暴露的是成员描述符，不是真正的字段默认值。
+        defaults = cls()
+
         # 环境变量只作为默认值来源，CLI 显式参数仍然应该优先覆盖它们。
         return cls(
-            model=getenv("STREAMVOX_AGENT_VOICE_MODEL", cls.model),
-            device=getenv("STREAMVOX_AGENT_VOICE_DEVICE", cls.device),
-            host=getenv("STREAMVOX_AGENT_VOICE_HOST", cls.host),
-            port=int(getenv("STREAMVOX_AGENT_VOICE_PORT", str(cls.port))),
+            model=getenv("STREAMVOX_AGENT_VOICE_MODEL", defaults.model),
+            device=getenv("STREAMVOX_AGENT_VOICE_DEVICE", defaults.device),
+            host=getenv("STREAMVOX_AGENT_VOICE_HOST", defaults.host),
+            port=int(getenv("STREAMVOX_AGENT_VOICE_PORT", str(defaults.port))),
             license_key=getenv("STREAMVOX_LICENSE_KEY"),
             license_path=getenv("STREAMVOX_LICENSE_PATH"),
             verify_model_sha256=getenv("STREAMVOX_VERIFY_MODEL_SHA256", "0") == "1",
             default_role_name=getenv("STREAMVOX_AGENT_VOICE_DEFAULT_ROLE_NAME"),
-            audio_backend=getenv("STREAMVOX_AGENT_VOICE_OUTPUT", getenv("STREAMVOX_AGENT_VOICE_AUDIO_BACKEND", cls.audio_backend)),
-            output_dir=Path(getenv("STREAMVOX_AGENT_VOICE_OUTPUT_DIR", str(cls.output_dir))),
+            audio_backend=getenv(
+                "STREAMVOX_AGENT_VOICE_OUTPUT",
+                getenv("STREAMVOX_AGENT_VOICE_AUDIO_BACKEND", defaults.audio_backend),
+            ),
+            output_dir=Path(getenv("STREAMVOX_AGENT_VOICE_OUTPUT_DIR", str(defaults.output_dir))),
         )
 
     @property

@@ -56,12 +56,12 @@ class VoiceEvent:
 
     event: str = "progress"
     text: str = ""
-    priority: str = "normal"
+    priority: str = "normal"  # TODO: 目前没有相关优先级设计，这里先占位
     action: str = "enqueue"
     interrupt: bool = False
     wait: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    id: str = field(default_factory=lambda: uuid4().hex)
+    id: str = field(default_factory=lambda: uuid4().hex) # 随机id
     created_at: float = field(default_factory=time)
 
     @classmethod

@@ -132,7 +132,7 @@ class VoiceClient:
             wait=wait,
             metadata=merged_metadata,
         )
-        voice_event.validate()
+        voice_event.validate()  # 参数检验
         return await self._post_json("/events", voice_event.to_payload())
 
     async def _say_with_policy(
@@ -773,7 +773,7 @@ class VoiceClient:
         边界异常:
             HTTP 非成功状态会抛出 HTTPStatusError。
         """
-
+        # 非阻塞式请求
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             response = await client.post(f"{self.base_url}{path}", json=payload)
             response.raise_for_status()

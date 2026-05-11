@@ -68,7 +68,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """
-        FastAPI 生命周期管理器。
+        FastAPI 生命周期管理器。初始化
 
         核心入参:
             app: 当前 FastAPI 应用。
@@ -415,7 +415,15 @@ def create_app(
         边界异常:
             协议非法返回 400，队列关闭返回 503。
         """
-
+        '''
+        TODO: 理解中间的笔记，后续删除：
+        
+        streamvox-say "我正在整理答案，请稍等" 
+        payload -> {'event': 'progress', 'text': '我正在整理答案，请稍等', 'priority': 'normal', 'action': 'enqueue', 'interrupt': False, 'wait': False, 'metadata': {}}
+        
+        
+        '''
+        print(f"当前请求体：{payload}")
         try:
             event = VoiceEvent.from_mapping(payload)
         except VoiceEventError as exc:
@@ -431,7 +439,7 @@ def create_app(
 
         try:
             # 入轨
-            item = await queue.enqueue(event)
+            item = await queue.enqueue(event) # event是一个VoiceEvent
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 

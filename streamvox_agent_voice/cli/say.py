@@ -282,6 +282,7 @@ def send(
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
     metadata = _build_metadata(role_name, streamvox_json, streamvox_json_file)
+    print(f"当前metadata数据：{metadata}")
     high_level_intent = _select_high_level_intent(info_text, progress_text, warning_text, urgent_text, done_text)
 
     # 高层策略入口优先处理，并拒绝混用底层控制参数，业务意图是给 Agent 一个稳定、少分支的调用面。
