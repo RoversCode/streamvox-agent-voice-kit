@@ -21,7 +21,7 @@ class VoiceClient:
         timeout: 单次 HTTP 请求超时时间；wait=True 时调用方可传更长超时。
 
     预期输出:
-        say/done/error/interrupt 返回 Runtime 的 JSON 响应，stop/status 返回控制接口响应。
+        say/warning/done/error/interrupt 返回 Runtime 的 JSON 响应，stop/status 返回控制接口响应。
         error 只是语义标签，不隐式打断；interrupt 才是控制快捷方法。
 
     边界异常:
@@ -149,7 +149,7 @@ class VoiceClient:
         按高层语音策略发送播报事件。
 
         核心入参:
-            policy_name: 高层意图名称，例如 info/progress/urgent/done。
+            policy_name: 高层意图名称，例如 info/progress/warning/urgent/done。
             text: 需要播报的文本。
             wait: 是否等待 Runtime 播报完成。
             role_name: 单次事件覆盖 Runtime 默认角色的角色名。
@@ -239,6 +239,41 @@ class VoiceClient:
 
         return await self._say_with_policy(
             "progress",
+            text,
+            wait=wait,
+            role_name=role_name,
+            streamvox=streamvox,
+            metadata=metadata,
+        )
+
+    async def warning(
+        self,
+        text: str,
+        *,
+        wait: bool = False,
+        role_name: str | None = None,
+        streamvox: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        发送需要用户注意但任务仍可继续的提醒播报。
+
+        核心入参:
+            text: 需要用户注意的提醒文本。
+            wait: 是否等待播报完成。
+            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
+            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
+            metadata: 附加信息，第一版只透传不解释。
+
+        预期输出:
+            返回 Runtime JSON 响应，默认映射为 warning/clear_pending_then_enqueue。
+
+        边界异常:
+            同 say。
+        """
+
+        return await self._say_with_policy(
+            "warning",
             text,
             wait=wait,
             role_name=role_name,
@@ -462,6 +497,33 @@ class VoiceClient:
             response = await client.get(f"{self.base_url}/capabilities")
             response.raise_for_status()
             return response.json()
+
+    async def realtime_selftest(
+        self,
+        *,
+        text: str,
+        role_name: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        调用 Runtime 的流式连续性自检接口。
+
+        核心入参:
+            text: 用于触发多个流式 chunk 的测试文本。
+            role_name: 可选角色名；为空时由 Runtime 按默认角色和 demo_role 顺序回退。
+
+        预期输出:
+            返回 Runtime 侧整理好的实时自检报告。
+
+        边界异常:
+            Runtime 不可达、参数非法或 HTTP 非 2xx 时抛出异常。
+        """
+
+        payload: dict[str, Any] = {
+            "text": text,
+        }
+        if role_name is not None:
+            payload["role_name"] = role_name
+        return await self._post_json("/selftest/realtime", payload)
 
     async def register_role(
         self,

@@ -1,194 +1,282 @@
 # StreamVox Agent Voice Kit
 
-面向 AI Agent 的本地流式语音 Runtime。
+面向 AI Agent 的本地语音运行时工具包。
 
-这个仓库的目标不是解释 StreamVox SDK 的全部背景，而是提供一套可直接接入的 `CLI-first` 合同：
+这份 README 只保留当前项目的实际使用教程，按下面顺序使用即可：
 
-- `streamvox-runtime`：启动并常驻一个本地 TTS Runtime。
-- `streamvox-say`：向 Runtime 发送进度、完成、打断和停止事件。
-- `GET /status`、`GET /capabilities`、`GET /roles`：供 Agent 在调用前读取当前状态。
+1. 安装项目依赖
+2. 安装你的 `streamvox` 私有 wheel
+3. 启动 `streamvox-runtime`
+4. 做一次自检
+5. 注册一个角色
+6. 用 `streamvox-say` 发语音事件
+7. 需要时给 Agent 安装 skill
 
-如果你的目标是让 Claude Code、Codex 或其他 Agent 直接安装并调用，这个仓库应该被当成“语音执行层”，而不是“项目背景说明书”。
+## 项目提供什么
 
-## 接入前提
+- `streamvox-runtime`
+  - 本地常驻 Runtime 服务
+- `streamvox-say`
+  - 向 Runtime 发送播报事件
+- `streamvox-agent`
+  - 为支持的 Agent 安装内置 skill
 
-- Python `>=3.10`
-- `uv`
-- 一个可用的 `streamvox` 私有 wheel
-- 可选音频后端：
-  - 本机播放：`sounddevice`
-  - 无声服务器：`--output null`
-  - 落盘调试：`--output wav`
+## 前提条件
 
-`streamvox` 仍然是外部前置依赖。本项目当前的“可直接接入”定义是：
+- Python `3.10`
+- 可用的 `uv`
+- 一个可安装的 `streamvox` 私有 wheel
+- 如果要本机直接播音：
+  - 可用音频设备
+- 如果只做静音服务调用：
+  - 使用 `--output null`
 
-拿到私有 wheel 后，不读源码，只看文档，就能在 Linux bash 或 Windows PowerShell 中完成安装、启动、注册角色、发声和排障。
-
-## 最短开始
+## 安装
 
 ### Linux / WSL
 
 ```bash
-./scripts/install.sh
+uv venv .venv --python 3.10 --python-preference only-managed
+uv sync --python .venv/bin/python
+uv pip install --python .venv/bin/python <your-streamvox-wheel>
 source .venv/bin/activate
-streamvox-runtime start --model voxcpm2-gguf --device auto --output speaker
 ```
 
 ### Windows PowerShell
 
 ```powershell
-.\scripts\install.ps1
+uv venv .venv --python 3.10 --python-preference only-managed
+uv sync --python .venv\Scripts\python.exe
+uv pip install --python .venv\Scripts\python.exe <your-streamvox-wheel>
 .\.venv\Scripts\Activate.ps1
+```
+
+## 启动 Runtime
+
+### 本机播音
+
+```bash
 streamvox-runtime start --model voxcpm2-gguf --device auto --output speaker
 ```
 
-更完整的安装与平台差异见 [docs/install.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/install.md)。
+`streamvox-runtime start` 现在会在启动阶段自动检查当前模型缓存里是否已经存在 `demo_role`：
 
-## Agent 能否自己选对 whl
+- 如果不存在：
+  - 自动用 `examples/Condition3.wav` 构建 `demo_role`
+  - `prompt_text` 不需要手工传入，Runtime 会自动做内部 ASR
+- 如果你没有显式传 `--default-role-name`：
+  - Runtime 会把 `demo_role` 设成当前会话默认角色
+- 如果你显式传了 `--default-role-name`：
+  - Runtime 仍然会确保 `demo_role` 存在，但不会覆盖你指定的默认角色
 
-可以，前提是它先做系统探测。
-
-当前仓库已经提供安装引导：
-
-- `scripts/install.sh`
-- `scripts/install.ps1`
-- `python -m streamvox_agent_voice.bootstrap --dry-run`
-
-它会根据当前系统和显卡状态，自动做两层判断：
-
-1. 选择项目依赖 extra
-   - Windows NVIDIA GPU：`windows-cuda`
-   - Windows AMD / Intel GPU：`windows-dml`
-   - Windows 无合适 GPU：`windows-cpu`
-2. 从 `https://github.com/RoversCode/StreamVox/releases` 自动挑选最匹配的 wheel 资产
-
-如果 Agent 想先判定再执行，可以先跑：
+### 静音运行
 
 ```bash
-python -m streamvox_agent_voice.bootstrap --dry-run
+streamvox-runtime start --model voxcpm2-gguf --device auto --output null
 ```
 
-这会输出 JSON 计划，包括：
+--output null的意思是，Runtime 仍然会正常接收事件、排队、调用模型生成语音，但生成出来的音频不会播放，也不会写文件
 
-- 当前系统画像
-- 推荐加速方案
-- 命中的 Release 资产
-- 需要安装的 optional extra
-
-## Agent 最短工作流
-
-无论是哪种 Agent，推荐都按这个顺序调用：
-
-1. 启动 Runtime。
-2. 读取 `streamvox-runtime status`。
-3. 读取 `streamvox-runtime capabilities`。
-4. 读取 `streamvox-runtime roles list`。
-5. 如果当前模型需要持久化角色，先注册或选择 `role_name`。
-6. 再发送 `streamvox-say`。
-
-最小检查命令：
+### 语音输出到文件夹
 
 ```bash
-streamvox-runtime status
-streamvox-runtime capabilities
+streamvox-runtime start --model voxcpm2-gguf --device auto --output wav --output-dir ./streamvox_outputs
+```
+
+常用启动参数：
+
+- `--model`
+  - 模型名或本地模型目录
+- `--device`
+  - 常用值是 `auto`、`cpu`、`gpu`、`gpu:<index>`
+- `--output`
+  - 常用值是 `speaker`、`null`、`wav`
+- `--output-dir`
+  - 当输出模式是 `wav` 时指定音频输出目录
+
+## 安装后先做自检
+
+### 最小检查
+
+```bash
 streamvox-runtime roles list
-streamvox-runtime selftest
 ```
 
-最小播报命令：
-
-```bash
-streamvox-say --progress "正在处理请求"
-streamvox-say --done "处理完成"
-```
-
-如果你希望 Agent 在正式接线前先自行验收，再判断这台机器是否适合做实时语音助手，可以继续执行：
+### 建议检查
 
 ```bash
 streamvox-runtime selftest
-streamvox-runtime benchmark --text "您好，我正在整理答案，请稍等片刻。"
-streamvox-runtime benchmark --json-summary-only --text "您好，我正在整理答案，请稍等片刻。"
 ```
 
-`selftest` 用来验证 `status`、`capabilities`、`roles list` 和最小播报链路。  
-`benchmark` 给出一个实时性结论，帮助 Agent 判断当前模型和设备是否适合作为私人智能助手的实时播报配置。  
-如果当前 Runtime 会话本来就是 `--output wav`，benchmark 会优先读取真实生成 wav 的音频时长；否则回退到文本内容估时。  
-`--json-summary-only` 适合 Agent 或脚本直接消费，只保留模型、耗时、参考语音时长和实时性结论这些核心字段。
+`selftest` 现在只做一件事：
 
-## Windows 重点
+- 检查当前模型的流式 chunk 生成是否跟得上实时播放
+- 如果后一个 chunk 到达时间晚于前一个 chunk 自身的可播放时长，会直接判定存在语音割裂风险
+- 这时通常应该换更小的模型，或者调整硬件和设备配置
 
-PowerShell 不适合长期依赖复杂内联 JSON。推荐优先使用 `--streamvox-json-file`。
+### 查看模型信息
 
-示例 `streamvox-voice.json`：
-
-```json
-{
-  "mode": "ref",
-  "control_text": "四川话，轻松一点"
-}
+```bash
+streamvox-runtime models list
 ```
 
-PowerShell 调用：
+其中：
 
-```powershell
-streamvox-say --role-name assistant_voice --streamvox-json-file .\streamvox-voice.json "这条请求显式指定 VoxCPM2 风格控制"
+- `models list`
+  - 默认输出极简纯文本，每行一个模型和当前硬件是否适合流畅运行的结论
+
+## 注册角色
+
+当前推荐使用本地音频文件注册角色：
+
+```bash
+streamvox-runtime roles register assistant_voice --audio ./examples/Condition3.wav --set-default
 ```
 
-角色注册同样支持文件输入：
+这条命令会做两件事：
 
-```powershell
-streamvox-runtime roles register assistant_voice `
-  --audio-file .\examples\Condition3.wav `
-  --streamvox-json-file .\prompt-config.json `
-  --set-default
+- 注册一个名为 `assistant_voice` 的持久化角色
+- 立即把它设成当前 Runtime 默认角色
+
+角色相关常用命令：
+
+```bash
+streamvox-runtime roles list
+streamvox-runtime roles set-default assistant_voice
+streamvox-runtime roles clear-default
+streamvox-runtime roles delete assistant_voice
 ```
 
-## 模型怎么选
+角色注册规则：
 
-- `qwen3-tts-clone-0.6b-gguf`
-  - 低延迟、低资源、短句播报优先。
-- `qwen3-tts-clone-1.7b-gguf`
-  - 更自然、更稳的单参考克隆与正式播报。
-- `s2-pro-4b-gguf`
-  - 高保真演播、多说话人、长文本内容成片。
-- `voxcpm2-gguf`
-  - 纯文本音色设计、参考克隆微调、续写与非语言标签控制。
+- 优先使用 `--audio`
+- `--prompt-text` 只在你要显式覆盖参考文本时再传
+- 如果不传 `--prompt-text`，Runtime 会自己转写参考音频
+- `--audio-path` 只适合同机高级用法，不是默认主路径
 
-具体参数、适用场景和文本写法见：
+## 发送语音事件
 
-- [docs/models/qwen3-tts-clone.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/models/qwen3-tts-clone.md)
-- [docs/models/s2-pro.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/models/s2-pro.md)
-- [docs/models/voxcpm2.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/models/voxcpm2.md)
+### 最简单的播报
 
-## 官方接入文档
+```bash
+streamvox-say "我正在整理答案，请稍等"
+```
 
-- [docs/agent-contract.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/agent-contract.md)
-- [docs/install.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/install.md)
-- [docs/event-protocol.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/event-protocol.md)
-- [docs/claude-code.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/claude-code.md)
-- [docs/codex.md](/g:/Workspace/projects/streamvox-agent-voice-kit/docs/codex.md)
+### 推荐使用高层事件接口
 
-## 机器可读能力快照
+```bash
+streamvox-say --progress "我正在读取项目结构"
+streamvox-say --warning "我发现有一项配置需要你稍后确认"
+streamvox-say --done "检查已经完成"
+```
 
-`streamvox-runtime capabilities` 现在不只返回“支持哪些字段”，还会返回 Agent 可直接消费的建议信息：
+### 指定角色播报
 
-- `best_for`
-- `recommended_workflows`
-- `recommended_parameters`
-- `parameter_notes`
-- `text_writing_tips`
-- `known_constraints`
+```bash
+streamvox-say --role-name assistant_voice --progress "现在使用指定角色播报"
+```
 
-这意味着 Agent 可以先读能力快照，再决定：
+### 等待当前事件播报完成
 
-- 当前该选哪个模型
-- 要不要显式传 `language`
-- 是否必须先拿到持久化 `role_name`
-- 当前是否适合使用 `control_text`、`speaker` 或 speaker tags
+```bash
+streamvox-say --done "处理完成" --wait
+```
 
-## 仍然不做什么
+### 中断当前播报
 
-- 不把 `streamvox` 私有 wheel 变成公网依赖
-- 不把 Runtime 变成完整的参数裁判器
-- 不把所有模型压平为同一种“控制文本”接口
-- 不负责 Agent 的记忆系统、工作流编排或 ASR 产品化能力
+```bash
+streamvox-say --interrupt "请先处理更紧急的任务"
+streamvox-say --stop
+```
+
+高层事件建议这样理解：
+
+- `--progress`
+  - 适合阶段推进中的普通进展
+- `--warning`
+  - 适合提醒用户注意，但任务还能继续
+- `--done`
+  - 适合任务收尾
+- `--urgent`
+  - 适合需要立即插播的新内容
+- `--info`
+  - 适合普通说明
+
+## 给 Agent 安装 skill
+
+当你已经手动安装并启动 Runtime 后，可以把内置 skill 装到支持的 Agent 默认目录。
+
+当前支持两个目标：
+
+- `codex`
+- `claude-code`
+
+### 同时安装到两个宿主
+
+```bash
+streamvox-agent init
+```
+
+默认安装位置：
+
+```text
+~/.codex/skills/streamvox-runtime/
+~/.claude/skills/streamvox-runtime/
+```
+
+### 只安装到一个宿主
+
+```bash
+streamvox-agent init --target codex
+streamvox-agent init --target claude-code
+```
+
+### 覆盖已存在的安装
+
+```bash
+streamvox-agent init --target codex --force
+```
+
+仓库内置 skill 源文件位于：
+
+- [skills/streamvox-runtime/SKILL.md](skills/streamvox-runtime/SKILL.md)
+
+## 常见问题
+
+### Runtime 启动失败
+
+先检查这几项：
+
+- `streamvox` 私有 wheel 是否真的安装在当前虚拟环境
+- `--model` 指向的模型是否可用
+- 当前设备参数是否适合你的机器
+- 用 `streamvox-runtime doctor --model <model>` 看诊断结果
+
+### `streamvox-say` 请求失败
+
+先看 CLI 打出来的服务端 `detail`，常见原因有：
+
+- 角色不存在
+- 默认角色为空
+- Runtime 还没启动
+- 当前模型或参数不支持本次请求
+
+### 角色存在但播报没命中默认角色
+
+先执行：
+
+```bash
+streamvox-runtime roles list
+```
+
+如果默认角色为空，执行：
+
+```bash
+streamvox-runtime roles set-default assistant_voice
+```
+
+或者每次调用时显式指定：
+
+```bash
+streamvox-say --role-name assistant_voice "你好"
+```

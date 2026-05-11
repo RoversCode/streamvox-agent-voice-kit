@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 
+from ..cli.runtime_probe import DEFAULT_REALTIME_SELFTEST_TEXT, build_streaming_selftest_report
 from ..events import VoiceEvent, VoiceEventError
 from .audio_player import AudioSink, build_audio_sink
 from .audio_assets import temporary_upload_file
@@ -80,6 +81,10 @@ def create_app(
         """
         # 当前已经存在的 asyncio 事件循环里，把一个普通同步函数 runtime_speaker.initialize，扔到线程池里的某个工作线程执行
         await asyncio.to_thread(runtime_speaker.initialize)
+        await asyncio.to_thread(
+            runtime_speaker.ensure_demo_role,
+            set_as_default=config.default_role_name is None,
+        )
         await queue.start()
         try:
             yield
@@ -182,6 +187,48 @@ def create_app(
             "default_role_name": config.default_role_name,
             "roles": roles,
         }
+
+    @app.post("/selftest/realtime")
+    async def realtime_selftest(payload: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
+        """
+        执行只关注流式连续性的实时语音自检。
+
+        核心入参:
+            payload: 可选 `text` 与 `role_name`；未传 `text` 时使用内置长文本，未传 `role_name` 时按默认角色、demo_role 顺序回退。
+
+        预期输出:
+            返回 chunk 时序、首个断裂点和是否适合实时语音播报的结论。
+
+        边界异常:
+            载荷非法返回 400，引擎不可用或探针失败返回 503。
+        """
+
+        if payload is None:
+            payload = {}
+
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="selftest payload must be a JSON object")
+
+        raw_text = payload.get("text", DEFAULT_REALTIME_SELFTEST_TEXT)
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="text must be a non-empty string")
+
+        raw_role_name = payload.get("role_name")
+        if raw_role_name is not None and not isinstance(raw_role_name, str):
+            raise HTTPException(status_code=400, detail="role_name must be a string when provided")
+
+        try:
+            measurement = await asyncio.to_thread(
+                runtime_speaker.probe_realtime_stream,
+                text=raw_text.strip(),
+                role_name=raw_role_name.strip() if isinstance(raw_role_name, str) and raw_role_name.strip() else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        return build_streaming_selftest_report(measurement)
 
     @app.post("/roles")
     async def register_role(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:

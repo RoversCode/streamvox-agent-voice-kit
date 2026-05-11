@@ -9,7 +9,7 @@ from uuid import uuid4
 
 
 # 关键常量：公开事件类型必须保持小集合，避免 Agent 随意发明事件导致 Runtime 行为不可预测。
-EVENT_TYPES = frozenset({"started", "progress", "done", "error", "interrupt", "stop"})
+EVENT_TYPES = frozenset({"started", "progress", "warning", "done", "error", "interrupt", "stop"})
 
 # 关键常量：优先级只影响队列处理，不直接泄漏到底层 TTS 引擎。
 PRIORITIES = frozenset({"low", "normal", "high"})
@@ -39,7 +39,7 @@ class VoiceEvent:
     Agent 发送给 StreamVox Runtime 的最小语音事件。
 
     核心入参:
-        event: 事件类型，限定为 started/progress/done/error/interrupt/stop。
+        event: 事件类型，限定为 started/progress/warning/done/error/interrupt/stop。
         text: 需要播报的文本；stop 事件允许为空。
         priority: 队列优先级，限定为 low/normal/high。
         action: 队列控制策略，默认 enqueue。

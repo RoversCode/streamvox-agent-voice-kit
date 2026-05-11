@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 
 # 关键常量：高层意图名称是 Agent 日常应该接触的小集合，避免调用方直接操纵底层 action。
-HIGH_LEVEL_POLICY_NAMES = frozenset({"info", "progress", "urgent", "done"})
+HIGH_LEVEL_POLICY_NAMES = frozenset({"info", "progress", "warning", "urgent", "done"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +59,9 @@ DEFAULT_VOICE_POLICIES: dict[str, VoicePolicy] = {
     # 进度播报允许覆盖尚未播放的旧 progress，业务意图是避免用户听到过期过程。
     "progress": VoicePolicy(event="progress", action="replace_pending"),
 
+    # warning 用于提醒用户关注新的风险或注意点，业务意图是清理过期进度后优先播报提醒，但不强制打断当前播放。
+    "warning": VoicePolicy(event="warning", action="clear_pending_then_enqueue"),
+
     # 紧急播报必须立即打断，业务意图是让错误或风险信息不要滞后于普通队列。
     "urgent": VoicePolicy(event="error", action="interrupt", interrupt=True),
 
@@ -72,7 +75,7 @@ def resolve_voice_policy(name: str) -> VoicePolicy:
     根据高层意图名称解析默认语音策略。
 
     核心入参:
-        name: 高层意图名称，当前支持 info/progress/urgent/done。
+        name: 高层意图名称，当前支持 info/progress/warning/urgent/done。
 
     预期输出:
         返回对应 VoicePolicy，供 Client 或 CLI 组装底层事件。

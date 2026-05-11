@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Event
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -18,6 +20,13 @@ from .audio_assets import (
 )
 from .config import RuntimeConfig
 from .model_registry import resolve_model_profile
+
+
+# 关键常量：demo_role 是启动时统一确保存在的标准演示角色名。
+DEMO_ROLE_NAME = "demo_role"
+
+# 关键常量：demo_role 固定使用仓库内样例音频，避免每个模型再维护不同入口。
+DEMO_ROLE_AUDIO_PATH = Path(__file__).resolve().parents[2] / "examples" / "Condition3.wav"
 
 
 class StreamVoxSpeaker:
@@ -241,6 +250,48 @@ class StreamVoxSpeaker:
         )
         return role_name
 
+    def ensure_demo_role(self, *, set_as_default: bool) -> dict[str, Any]:
+        """
+        确保当前模型缓存中存在统一的演示角色 `demo_role`。
+
+        核心入参:
+            set_as_default: 是否在确保角色存在后把它设成当前 Runtime 会话默认角色。
+
+        预期输出:
+            返回角色是否新建、是否设为默认角色以及使用的参考音频路径。
+
+        边界异常:
+            参考音频缺失、自动 ASR 失败、角色注册失败或默认角色切换失败时抛出异常，阻止 Runtime 带病启动。
+        """
+
+        available_roles = set(self.list_roles())
+        created = False
+
+        # 启动阶段只允许使用仓库内标准样例音频，避免 Runtime 启动依赖外部未声明资产。
+        if DEMO_ROLE_NAME not in available_roles:
+            if not DEMO_ROLE_AUDIO_PATH.is_file():
+                raise RuntimeError(f"demo role reference audio does not exist: {DEMO_ROLE_AUDIO_PATH}")
+
+            self.register_role(
+                role_name=DEMO_ROLE_NAME,
+                prompt_text=None,
+                audio_path=str(DEMO_ROLE_AUDIO_PATH),
+                persist=True,
+                make_prompt_kwargs=None,
+            )
+            created = True
+
+        # 这里显式复用默认角色设置逻辑，保证角色存在性校验和会话状态更新完全一致。
+        if set_as_default:
+            self.set_default_role_name(DEMO_ROLE_NAME)
+
+        return {
+            "role_name": DEMO_ROLE_NAME,
+            "created": created,
+            "set_as_default": set_as_default,
+            "audio_path": str(DEMO_ROLE_AUDIO_PATH),
+        }
+
     def list_roles(self) -> list[str]:
         """
         列出当前模型下所有已缓存角色。
@@ -322,6 +373,69 @@ class StreamVoxSpeaker:
 
         self.config.default_role_name = normalized_role_name
         return normalized_role_name
+
+    def probe_realtime_stream(
+        self,
+        *,
+        text: str,
+        role_name: str | None,
+    ) -> dict[str, Any]:
+        """
+        在不播放音频的前提下，直接测量底层流式生成器的 chunk 到达时序。
+
+        核心入参:
+            text: 用于触发流式生成的测试文本。
+            role_name: 可选显式角色名；为空时自动按默认角色、demo_role 顺序回退。
+
+        预期输出:
+            返回模型名、采样率、实际使用角色和每个 chunk 的到达时间、时长等指标。
+
+        边界异常:
+            引擎未初始化、角色不可用或底层 stream 失败时抛出异常。
+        """
+
+        engine = self._require_engine()
+        resolved_role_name = self._resolve_probe_role_name(role_name)
+        stream_kwargs = self._build_probe_stream_kwargs(resolved_role_name)
+        sample_rate = self.sample_rate
+        if sample_rate <= 0:
+            raise RuntimeError("invalid runtime sample_rate for realtime selftest")
+
+        chunks_payload: list[dict[str, Any]] = []
+        previous_chunk_arrived_at: float | None = None
+        probe_started_at = perf_counter()
+
+        for index, chunk in enumerate(engine.stream(text=text, **stream_kwargs), start=1):
+            chunk_arrived_at = perf_counter()
+            normalized_chunk = self._coerce_stream_chunk(chunk)
+            sample_count = int(normalized_chunk.size)
+            chunk_duration_ms = (sample_count / sample_rate) * 1000 if sample_count > 0 else 0.0
+            interval_since_previous_ms = None
+            if previous_chunk_arrived_at is not None:
+                interval_since_previous_ms = (chunk_arrived_at - previous_chunk_arrived_at) * 1000
+
+            chunks_payload.append(
+                {
+                    "index": index,
+                    "arrival_offset_ms": round((chunk_arrived_at - probe_started_at) * 1000, 3),
+                    "interval_since_previous_ms": (
+                        round(interval_since_previous_ms, 3) if interval_since_previous_ms is not None else None
+                    ),
+                    "sample_count": sample_count,
+                    "chunk_duration_ms": round(chunk_duration_ms, 3),
+                }
+            )
+            previous_chunk_arrived_at = chunk_arrived_at
+
+        return {
+            "model": self.config.model,
+            "sample_rate": sample_rate,
+            "text": text,
+            "role_name": resolved_role_name,
+            "stream_kwargs": dict(stream_kwargs),
+            "chunk_count": len(chunks_payload),
+            "chunks": chunks_payload,
+        }
 
     def shutdown(self) -> None:
         """
@@ -420,6 +534,67 @@ class StreamVoxSpeaker:
             profile.validate_stream_request(stream_kwargs=kwargs)
         return kwargs
 
+    def _build_probe_stream_kwargs(self, role_name: str) -> dict[str, Any]:
+        """
+        构造实时自检探针使用的最小流式参数集合。
+
+        核心入参:
+            role_name: 探针最终解析得到的角色名。
+
+        预期输出:
+            返回可直接传给 `TTSEngine.stream(...)` 的字典。
+
+        边界异常:
+            已知模型能力冲突时抛出 ValueError。
+        """
+
+        profile = resolve_model_profile(self.config.model)
+        stream_kwargs: dict[str, Any] = {
+            "track_performance": False,
+        }
+
+        # 这里优先测“真实会话最可能使用的推理路径”，而不是只测一个脱离角色资产的裸文本模式。
+        stream_kwargs["role_name"] = role_name
+        if profile is not None and profile.name == "voxcpm2-gguf":
+            stream_kwargs["mode"] = "ref"
+
+        if profile is not None:
+            profile.validate_stream_request(stream_kwargs=stream_kwargs)
+        return stream_kwargs
+
+    def _resolve_probe_role_name(self, role_name: str | None) -> str:
+        """
+        解析实时自检应该使用的角色名。
+
+        核心入参:
+            role_name: 调用方显式指定的角色名。
+
+        预期输出:
+            优先返回显式角色，其次返回当前默认角色，再回退到 `demo_role`。
+
+        边界异常:
+            调用方显式传入不存在角色，或当前既没有默认角色也没有 `demo_role` 时抛出 ValueError。
+        """
+
+        if role_name is not None:
+            normalized_role_name = role_name.strip()
+            if not normalized_role_name:
+                raise ValueError("role_name must be a non-empty string")
+            self._validate_existing_role_name(normalized_role_name)
+            return normalized_role_name
+
+        if self.config.default_role_name is not None:
+            self._validate_existing_role_name(self.config.default_role_name)
+            return self.config.default_role_name
+
+        available_roles = set(self.list_roles())
+        if DEMO_ROLE_NAME in available_roles:
+            return DEMO_ROLE_NAME
+
+        raise ValueError(
+            "no available role for realtime selftest; please pass --role-name or ensure demo_role/default role exists"
+        )
+
     def _streamvox_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         """
         提取模型私有参数透传对象。
@@ -438,6 +613,24 @@ class StreamVoxSpeaker:
         if isinstance(value, dict):
             return value
         return {}
+
+    def _coerce_stream_chunk(self, chunk: object) -> np.ndarray:
+        """
+        把底层 stream 返回的 chunk 统一转换成一维 `float32` 音频数组。
+
+        核心入参:
+            chunk: SDK 返回的单个音频分片，可能是 bytes、numpy 数组或其他可转数组对象。
+
+        预期输出:
+            返回一维 `numpy.float32` 数组，便于统一计算样本数与可播放时长。
+
+        边界异常:
+            无法转换的对象会沿用 numpy 原始异常。
+        """
+
+        if isinstance(chunk, bytes):
+            return np.frombuffer(chunk, dtype=np.float32)
+        return np.asarray(chunk, dtype=np.float32).reshape(-1)
 
     def _validate_existing_role_name(self, role_name: str) -> None:
         """

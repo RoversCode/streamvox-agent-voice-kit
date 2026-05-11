@@ -14,20 +14,23 @@ import uvicorn
 from ..client import VoiceClient
 from ..runtime import (
     RuntimeConfig,
-    build_model_doctor_report,
     create_app,
     detect_system_hardware,
-    list_model_profiles,
     recommend_model_profiles,
-    resolve_model_profile,
 )
 from .json_options import parse_json_object_option
-from .runtime_probe import build_benchmark_summary, run_runtime_benchmark, run_runtime_selftest
+from .runtime_probe import (
+    DEFAULT_REALTIME_SELFTEST_TEXT,
+    build_benchmark_summary,
+    build_streaming_selftest_summary,
+    run_runtime_benchmark,
+    run_runtime_realtime_selftest,
+)
 from .runtime_supervisor import RuntimeShutdownGuard, is_runtime_child_process, run_supervised_start
 
 
 app = typer.Typer(help="Manage the local StreamVox Agent Voice Runtime.")
-models_app = typer.Typer(help="Inspect supported StreamVox model profiles.")
+models_app = typer.Typer(help="List supported StreamVox model profiles.")
 roles_app = typer.Typer(help="Manage cached prompt roles in the local Runtime.")
 app.add_typer(models_app, name="models")
 app.add_typer(roles_app, name="roles")
@@ -211,6 +214,48 @@ def _format_transport_error(exc: httpx.HTTPError) -> str:
     return f"Runtime request failed: {exc}"
 
 
+def _model_recommendation_message(status: str) -> str:
+    """
+    把模型推荐状态映射成面向人类的极简运行结论。
+
+    核心入参:
+        status: `recommend_model_profiles()` 返回的推荐状态。
+
+    预期输出:
+        返回带有 `✅/❌` 的中文结论文案。
+
+    边界异常:
+        未知状态统一降级为保守提示，避免误报为可流畅运行。
+    """
+
+    messages = {
+        "recommended": "✅当前硬件满足推荐配置，可流畅运行该模型",
+        "supported": "❌当前硬件达到最低要求但未达推荐配置，谨慎选择",
+        "cpu_fallback": "❌当前硬件缺少合适 GPU，仅建议谨慎尝试",
+        "unknown": "❌当前硬件信息不足，无法确认是否可流畅运行，谨慎选择",
+        "insufficient": "❌硬件不满足推荐配置，谨慎选择",
+    }
+    return messages.get(status, "❌当前硬件信息不足，无法确认是否可流畅运行，谨慎选择")
+
+
+def _format_model_recommendation_line(model_name: str, status: str) -> str:
+    """
+    生成 `models list` 的单行输出。
+
+    核心入参:
+        model_name: 模型名。
+        status: 当前机器上的推荐状态。
+
+    预期输出:
+        返回 `模型名 [结论]` 形式的纯文本。
+
+    边界异常:
+        不抛异常。
+    """
+
+    return f"{model_name} [{_model_recommendation_message(status)}]"
+
+
 @app.command()
 def start(
     model: str = typer.Option("voxcpm2-gguf", "--model", help="StreamVox model name or local bundle path."),
@@ -302,52 +347,6 @@ def start(
 
 
 @app.command()
-def status(
-    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
-    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
-    timeout: float = typer.Option(5.0, "--timeout", help="HTTP request timeout seconds."),
-) -> None:
-    """
-    查询 Runtime 状态。
-
-    核心入参:
-        host/port/timeout: Runtime 地址和请求超时。
-
-    预期输出:
-        stdout 输出 Runtime 状态 JSON。
-
-    边界异常:
-        Runtime 不可达时 httpx 异常会使 CLI 非零退出。
-    """
-
-    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(_run_client_request(client.status()))
-
-
-@app.command()
-def capabilities(
-    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
-    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
-    timeout: float = typer.Option(5.0, "--timeout", help="HTTP request timeout seconds."),
-) -> None:
-    """
-    查询当前 Runtime 会话能力快照。
-
-    核心入参:
-        host/port/timeout: Runtime 地址和请求超时。
-
-    预期输出:
-        stdout 输出当前模型能力、默认角色与输出模式等信息。
-
-    边界异常:
-        Runtime 不可达时 httpx 异常会使 CLI 非零退出。
-    """
-
-    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(_run_client_request(client.capabilities()))
-
-
-@app.command()
 def selftest(
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
@@ -355,49 +354,39 @@ def selftest(
     role_name: Optional[str] = typer.Option(
         None,
         "--role-name",
-        help="Optional persisted role name used by the speech checks.",
+        help="Optional persisted role name used by the realtime selftest.",
     ),
-    progress_text: str = typer.Option(
-        "Runtime 自检：正在验证播报链路。",
-        "--progress-text",
-        help="Progress text used during speech-enabled selftest.",
-    ),
-    done_text: str = typer.Option(
-        "Runtime 自检：播报链路验证完成。",
-        "--done-text",
-        help="Done text used during speech-enabled selftest.",
-    ),
-    speak: bool = typer.Option(
-        True,
-        "--speak/--no-speak",
-        help="Whether to send progress and done events during selftest.",
+    text: str = typer.Option(
+        DEFAULT_REALTIME_SELFTEST_TEXT,
+        "--text",
+        help="Long text used to inspect chunk continuity during realtime selftest.",
     ),
 ) -> None:
+    # [旧注释已废弃]: 原 docstring 因编码异常出现乱码，已按当前实现语义重写。
     """
-    鎵ц瀹夎鍚庣殑鏈€灏忚嚜妫€锛岀敤浜庨獙璇?Runtime 鍜屾挱鎶ラ摼璺槸鍚︽墦閫氥€?
-    鏍稿績鍏ュ弬:
-        host/port/timeout: Runtime 鍦板潃涓庤姹傝秴鏃躲€?
-        role_name: 鍙€夋寔涔呭寲瑙掕壊鍚嶏紝閬垮厤渚濊禆浼氳瘽榛樿瑙掕壊銆?
-        progress_text/done_text: 鑷鏈熼棿鐨勬挱鎶ユ枃鏈€?
-        speak: 鏄惁鐪熸鍙戦€佹挱鎶ヤ簨浠躲€?
-    棰勬湡杈撳嚭:
-        stdout 杈撳嚭鍖呭惈 `status`銆乣capabilities`銆乣roles list` 鍜屽彲閫夋挱鎶ラ獙璇佺殑 JSON 鎶ュ憡銆?
-    杈圭晫寮傚父:
-        Runtime 涓嶅彲杈炬垨鎾姤鏈夋晥鎬ч獙璇佸け璐ユ椂锛岄潪闆堕€€鍑哄苟鎵撳嵃鍙閿欒銆?
+    执行只关注流式连续性的 Runtime 自检。
+
+    核心入参:
+        host/port/timeout: Runtime 服务地址与 HTTP 请求超时。
+        role_name: 可选的持久化角色名；为空时由 Runtime 自己按默认角色、demo_role 顺序回退。
+        text: 用于触发多个 chunk 的长文本，便于检测流式生成是否会中途断裂。
+
+    预期输出:
+        stdout 输出一份 JSON 自检报告，包含 chunk 时序、首个断裂点和是否适合实时语音播报的结论。
+
+    边界异常:
+        Runtime 不可达、角色不可用、底层 stream 失败或探针执行异常时，CLI 会以非零状态退出并打印可读错误。
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(
-        _run_client_request(
-            run_runtime_selftest(
-                client,
-                progress_text=progress_text,
-                done_text=done_text,
-                role_name=role_name,
-                include_speech=speak,
-            )
+    selftest_report = _run_client_request(
+        run_runtime_realtime_selftest(
+            client,
+            text=text,
+            role_name=role_name,
         )
     )
+    _print_json(build_streaming_selftest_summary(selftest_report))
 
 
 @app.command()
@@ -429,16 +418,22 @@ def benchmark(
     ),
 ) -> None:
     """
-    鎵ц闈㈠悜 Agent 鐨勮交閲忓熀鍑嗘祴璇曪紝缁欏嚭鏄惁閫傚悎瀹炴椂鎾姤鐨勫惎鍙戝紡鍒ゆ柇銆?
-    鏍稿績鍏ュ弬:
-        host/port/timeout: Runtime 鍦板潃涓庤姹傝秴鏃躲€?
-        role_name: 鍙€夋寔涔呭寲瑙掕壊鍚嶃€?
-        text: 鐢ㄤ簬鍩哄噯娴嬭瘯鐨勬挱鎶ユ枃鏈€?
-        iterations: 鍙嶅娴嬭瘯娆℃暟锛岀敤浜庨檷浣庡崟娆℃姈鍔ㄧ殑褰卞搷銆?
-    棰勬湡杈撳嚭:
-        stdout 杈撳嚭鎺ュ彛寰€杩斿欢杩熴€佹挱鎶ュ畬鎴愯€楁椂銆佷及绠楄闊虫椂闀垮拰瀹炴椂鎬у垽瀹氱粨鏋溿€?
-    杈圭晫寮傚父:
-        杩欐槸鍚彂寮忔祴璇曪紝涓嶆槸搴曞眰澹板鐪熷€煎熀鍑嗭紱Runtime 涓嶅彲杈炬椂浼氶潪闆堕€€鍑恒€?
+    执行面向 Agent 播报场景的轻量基准测试，用于评估当前 Runtime 是否适合实时语音反馈。
+
+    核心入参:
+        host/port/timeout: Runtime 服务地址与请求超时配置。
+        role_name: 可选的持久化角色名，用于让基准请求复用指定角色配置。
+        text: 基准测试时实际发送给 Runtime 的播报文本。
+        iterations: 重复测量次数，用于降低单次抖动对结果的影响。
+        json_summary_only: 是否只输出适合机器读取的紧凑摘要 JSON。
+
+    预期输出:
+        stdout 输出完整基准报告，或在启用 `--json-summary-only` 时输出压缩后的摘要结果；
+        报告中通常包含请求往返耗时、播报完成耗时、估算音频时长以及实时性判断。
+
+    边界异常:
+        这是启发式体验基准，不等价于底层声学性能压测；
+        当 Runtime 不可达、请求失败或基准执行异常时，命令会以非零状态退出。
     """
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
@@ -482,88 +477,22 @@ def stop(
 @models_app.command("list")
 def models_list() -> None:
     """
-    列出当前内置支持的模型能力摘要。
+    列出所有内置模型在当前硬件上的极简运行结论。
 
     核心入参:
         本命令无入参。
 
     预期输出:
-        stdout 输出内置模型注册表列表。
+        stdout 每行输出一个模型及其是否适合当前硬件的结论。
 
     边界异常:
         不抛业务异常。
     """
 
-    _print_json({"models": [profile.to_payload() for profile in list_model_profiles()]})
-
-
-@models_app.command("inspect")
-def models_inspect(
-    model: str = typer.Argument(..., help="StreamVox model name or local bundle path."),
-) -> None:
-    """
-    查看单个模型的能力详情。
-
-    核心入参:
-        model: 模型名或本地 bundle 路径。
-
-    预期输出:
-        stdout 输出该模型的能力摘要。
-
-    边界异常:
-        未知模型会抛出参数错误，提示用户显式确认模型名。
-    """
-
-    profile = resolve_model_profile(model)
-    if profile is None:
-        raise typer.BadParameter(f"unsupported or unknown model profile: {model}")
-    _print_json(profile.to_payload())
-
-
-@models_app.command("recommend")
-def models_recommend() -> None:
-    """
-    根据当前机器硬件给出模型推荐排序。
-
-    核心入参:
-        本命令无入参，直接探测本机 CPU / RAM / GPU。
-
-    预期输出:
-        stdout 输出硬件快照和推荐模型列表。
-
-    边界异常:
-        本命令不会因为探测失败直接报错，探测问题会折叠进输出告警。
-    """
-
     hardware = detect_system_hardware()
     recommendations = recommend_model_profiles(hardware)
-    _print_json(
-        {
-            "hardware": hardware.to_payload(),
-            "recommendations": [recommendation.to_payload() for recommendation in recommendations],
-        }
-    )
-
-
-@app.command()
-def doctor(
-    model: str = typer.Option("voxcpm2-gguf", "--model", help="StreamVox model name or local bundle path."),
-) -> None:
-    """
-    检查指定模型在当前机器上的基本运行条件。
-
-    核心入参:
-        model: 模型名或本地 bundle 路径。
-
-    预期输出:
-        stdout 输出单模型硬件诊断和推荐设备。
-
-    边界异常:
-        未知模型不会报错退出，而是返回 profile_found=false 的诊断结果。
-    """
-
-    report = build_model_doctor_report(model)
-    _print_json(report.to_payload())
+    for recommendation in recommendations:
+        typer.echo(_format_model_recommendation_line(recommendation.profile.name, recommendation.status))
 
 
 @roles_app.command("list")
@@ -595,12 +524,16 @@ def roles_register(
     audio_path: Optional[str] = typer.Option(
         None,
         "--audio-path",
-        help="Reference audio path on the Runtime host. Use this for same-machine registration.",
+        help="Reference audio path on the Runtime host. This is an advanced same-machine option.",
     ),
     audio_file: Optional[str] = typer.Option(
         None,
+        "--audio",
         "--audio-file",
-        help="Reference audio file to upload with multipart/form-data. Recommended for larger assets or remote Runtime.",
+        help=(
+            "Local reference audio file path. This is the recommended role registration input on Linux and Windows; "
+            "omit --prompt-text to let Runtime auto-transcribe internally."
+        ),
     ),
     audio_data_json: Optional[str] = typer.Option(
         None,
@@ -620,7 +553,7 @@ def roles_register(
     prompt_text: Optional[str] = typer.Option(
         None,
         "--prompt-text",
-        help="Reference transcript text. Omit to let Runtime auto-transcribe the reference audio.",
+        help="Optional reference transcript override. Omit to let Runtime auto-transcribe the reference audio internally.",
     ),
     set_default: bool = typer.Option(False, "--set-default", help="Set the registered role as the Runtime default role."),
     streamvox_json: Optional[str] = typer.Option(
@@ -661,7 +594,7 @@ def roles_register(
     )
     if audio_source_count != 1:
         raise typer.BadParameter(
-            "exactly one of --audio-path, --audio-file or --audio-data-json/--audio-data-file must be provided"
+            "exactly one of --audio/--audio-file, --audio-path or --audio-data-json/--audio-data-file must be provided"
         )
     if audio_data_value is None and sample_rate is not None:
         raise typer.BadParameter("--sample-rate is only valid with --audio-data-json or --audio-data-file")
@@ -786,7 +719,7 @@ def main() -> None:
         命令行参数由 Typer 解析。
 
     预期输出:
-        分发到 start/status/stop 子命令。
+        分发到 start/selftest/benchmark/stop/models/roles 等子命令。
 
     边界异常:
         Typer 负责把参数错误转换为 CLI 错误提示。

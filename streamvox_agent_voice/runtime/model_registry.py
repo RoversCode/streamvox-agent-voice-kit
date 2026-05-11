@@ -1029,6 +1029,24 @@ def build_capability_snapshot(config: RuntimeConfig) -> dict[str, Any]:
             "known_constraints": [],
         }
     )
+    role_registration_contract = (
+        {
+            # 关键字段：推荐 Agent 统一把“本地音频文件路径”当成角色注册的主输入，而不是让它理解内部 ASR 细节。
+            "preferred_cli_option": "--audio",
+            "compatibility_cli_options": ["--audio-file", "--audio-path"],
+            "preferred_transport": "multipart_upload",
+            "preferred_reference_input": "local_audio_file",
+            "supports_runtime_host_path": True,
+            "supports_in_memory_audio": profile.prompt.memory_audio,
+            "prompt_text_optional": profile.prompt.auto_prompt_text_from_asr,
+            "prompt_text_strategy": (
+                "internal_auto_asr" if profile.prompt.auto_prompt_text_from_asr else "caller_must_provide"
+            ),
+            "agent_needs_to_understand_internal_asr": False,
+        }
+        if profile is not None
+        else None
+    )
     return {
         "requested_model": config.model,
         "resolved_model": profile.name if profile is not None else None,
@@ -1038,6 +1056,7 @@ def build_capability_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         "sample_rate": profile.sample_rate if profile is not None else None,
         "hardware": profile.hardware.to_payload() if profile is not None else None,
         "prompt": profile.prompt.to_payload() if profile is not None else None,
+        "role_registration": role_registration_contract,
         "controls": controls,
         **guidance,
         # 关键字段：session 用来表达当前 Runtime 会话级默认能力，而不是静态模型文档。

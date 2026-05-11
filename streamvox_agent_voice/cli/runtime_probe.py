@@ -17,6 +17,11 @@ _CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 _NUMBER_PATTERN = re.compile(r"\d+(?:[.,]\d+)?")
 _PAUSE_PUNCTUATION = "，。！？；：,.!?;:"
+DEFAULT_REALTIME_SELFTEST_TEXT = (
+    "现在开始执行实时流式语音自检，这段文本会尽量拉长生成过程，"
+    "用于观察每一个音频分片的到达间隔是否会超过上一段音频自身的可播放时长，"
+    "如果后续分片明显来得过慢，就说明当前模型在这台机器上存在语音割裂风险。"
+)
 
 
 @dataclass(slots=True)
@@ -144,6 +149,66 @@ async def run_runtime_selftest(
         "speech_enabled": include_speech,
         "speech_steps": speech_step_names,
         "checks": [step.to_payload() for step in steps],
+    }
+
+
+async def run_runtime_realtime_selftest(
+    client: VoiceClient,
+    *,
+    text: str,
+    role_name: str | None,
+) -> dict[str, Any]:
+    """
+    执行仅关注流式连续性的 Runtime 自检。
+
+    核心入参:
+        client: 指向目标 Runtime 的 HTTP 客户端。
+        text: 用于触发多 chunk 生成的自检文本。
+        role_name: 可选的显式角色名；为空时由 Runtime 自己按默认角色、demo_role 顺序回退。
+
+    预期输出:
+        返回包含 chunk 到达时序、断裂判断和建议文案的 JSON 对象。
+
+    边界异常:
+        Runtime 不可达、角色不可用或底层探针失败时异常继续向上传递，由 CLI 统一处理。
+    """
+
+    response = await client.realtime_selftest(text=text, role_name=role_name)
+    return {
+        "status": "ok",
+        "runtime": {
+            "base_url": client.base_url,
+            "timeout_seconds": client.timeout,
+        },
+        "selftest": response,
+    }
+
+
+def build_streaming_selftest_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """
+    把完整实时自检报告压缩成更适合 CLI 直接展示的摘要结果。
+
+    核心入参:
+        report: `run_runtime_realtime_selftest()` 返回的完整报告。
+
+    预期输出:
+        返回只保留模型、角色、推理参数和最终实时结论的极简 JSON。
+
+    边界异常:
+        缺失字段时按空值降级，不主动抛出 KeyError。
+    """
+
+    selftest = report.get("selftest", {})
+    measurement = selftest.get("measurement", {})
+    inference_parameters = measurement.get("stream_kwargs", {})
+    ready_for_realtime = selftest.get("ready_for_realtime")
+
+    return {
+        "model": measurement.get("model"),
+        "role_name": measurement.get("role_name"),
+        "inference_parameters": inference_parameters if isinstance(inference_parameters, dict) else {},
+        # 这里把复杂判定统一折叠成人类最关心的一句话，避免 CLI 输出一堆过程细节。
+        "realtime": "✅ 流畅实时语音合成。" if ready_for_realtime is True else "❌ 无法实时语音合成。",
     }
 
 
@@ -380,6 +445,101 @@ def build_benchmark_summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_streaming_selftest_report(measurement: dict[str, Any]) -> dict[str, Any]:
+    """
+    把 Runtime 返回的原始 chunk 时序测量结果整理成可读自检报告。
+
+    核心入参:
+        measurement: 由 Runtime 内部探针采集到的原始测量字典。
+
+    预期输出:
+        返回包含 chunk 明细、首个断裂点和是否适合实时语音的报告。
+
+    边界异常:
+        缺失字段时按保守空值降级，不主动抛出 KeyError。
+    """
+
+    chunk_payloads = measurement.get("chunks", [])
+    normalized_chunks: list[dict[str, Any]] = []
+    first_gap_chunk_index: int | None = None
+    first_gap_interval_ms: float | None = None
+    first_gap_previous_chunk_duration_ms: float | None = None
+    previous_chunk_duration_ms: float | None = None
+
+    if not isinstance(chunk_payloads, list):
+        chunk_payloads = []
+
+    # 这里按“下一块到达是否晚于上一块可播放时长”做判定，避免只看整段耗时掩盖中途割裂。
+    for raw_chunk in chunk_payloads:
+        if not isinstance(raw_chunk, dict):
+            continue
+
+        interval_since_previous_ms = _coerce_optional_float(raw_chunk.get("interval_since_previous_ms"))
+        current_chunk_index = _coerce_int(raw_chunk.get("index"))
+        gap_from_previous = bool(
+            previous_chunk_duration_ms is not None
+            and interval_since_previous_ms is not None
+            and interval_since_previous_ms > previous_chunk_duration_ms
+        )
+
+        if gap_from_previous and first_gap_chunk_index is None:
+            first_gap_chunk_index = current_chunk_index
+            first_gap_interval_ms = round(interval_since_previous_ms, 3) if interval_since_previous_ms is not None else None
+            first_gap_previous_chunk_duration_ms = (
+                round(previous_chunk_duration_ms, 3) if previous_chunk_duration_ms is not None else None
+            )
+
+        normalized_chunk = {
+            "index": current_chunk_index,
+            "arrival_offset_ms": _coerce_optional_float(raw_chunk.get("arrival_offset_ms")),
+            "interval_since_previous_ms": interval_since_previous_ms,
+            "sample_count": _coerce_int(raw_chunk.get("sample_count")),
+            "chunk_duration_ms": _coerce_optional_float(raw_chunk.get("chunk_duration_ms")),
+            "gap_from_previous": gap_from_previous,
+        }
+        normalized_chunks.append(normalized_chunk)
+        previous_chunk_duration_ms = normalized_chunk["chunk_duration_ms"]
+
+    chunk_count = len(normalized_chunks)
+    if chunk_count <= 1:
+        return {
+            "status": "not_enough_chunks",
+            "ready_for_realtime": None,
+            "summary": "样本文本生成的 chunk 数不足，暂时无法判断是否存在流式断裂。",
+            "suggestion": "建议换一段更长的文本重试，确保模型至少生成两个音频分片。",
+            "first_gap_chunk_index": None,
+            "first_gap_interval_ms": None,
+            "previous_chunk_duration_ms": None,
+            "measurement": measurement,
+            "chunks": normalized_chunks,
+        }
+
+    if first_gap_chunk_index is not None:
+        return {
+            "status": "risk_detected",
+            "ready_for_realtime": False,
+            "summary": "当前模型流式生成存在断裂风险，推荐使用更小的模型。",
+            "suggestion": "后续 chunk 到达时间已经晚于上一段音频可播放时长，连续播报时容易出现割裂。",
+            "first_gap_chunk_index": first_gap_chunk_index,
+            "first_gap_interval_ms": first_gap_interval_ms,
+            "previous_chunk_duration_ms": first_gap_previous_chunk_duration_ms,
+            "measurement": measurement,
+            "chunks": normalized_chunks,
+        }
+
+    return {
+        "status": "ok",
+        "ready_for_realtime": True,
+        "summary": "当前模型流式生成未发现明显断裂风险，可以继续用于实时语音播报。",
+        "suggestion": "所有后续 chunk 的到达间隔都没有超过上一段音频的可播放时长。",
+        "first_gap_chunk_index": None,
+        "first_gap_interval_ms": None,
+        "previous_chunk_duration_ms": None,
+        "measurement": measurement,
+        "chunks": normalized_chunks,
+    }
+
+
 def _resolve_output_dir(status_payload: dict[str, Any]) -> Path | None:
     """
     从 Runtime 状态快照中解析当前输出目录。
@@ -395,6 +555,44 @@ def _resolve_output_dir(status_payload: dict[str, Any]) -> Path | None:
     if not isinstance(raw_output_dir, str) or not raw_output_dir.strip():
         return None
     return Path(raw_output_dir)
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    """
+    把任意数值字段安全转换成浮点数。
+
+    核心入参:
+        value: 待转换的字段值。
+
+    预期输出:
+        数值时返回保留三位小数的浮点数；缺失或非法时返回 None。
+
+    边界异常:
+        不抛异常，统一按空值降级。
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), 3)
+
+
+def _coerce_int(value: Any) -> int | None:
+    """
+    把任意数值字段安全转换成整数。
+
+    核心入参:
+        value: 待转换的字段值。
+
+    预期输出:
+        整数值时返回 int；缺失或非法时返回 None。
+
+    边界异常:
+        不抛异常，统一按空值降级。
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _list_wav_output_files(output_dir: Path | None) -> set[Path]:

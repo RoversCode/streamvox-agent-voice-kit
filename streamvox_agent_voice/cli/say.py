@@ -90,6 +90,7 @@ def _build_metadata(
 def _select_high_level_intent(
     info_text: str | None,
     progress_text: str | None,
+    warning_text: str | None,
     urgent_text: str | None,
     done_text: str | None,
 ) -> tuple[str, str] | None:
@@ -99,6 +100,7 @@ def _select_high_level_intent(
     核心入参:
         info_text: --info 提供的普通说明文本。
         progress_text: --progress 提供的可覆盖进度文本。
+        warning_text: --warning 提供的提醒文本。
         urgent_text: --urgent 提供的紧急插播文本。
         done_text: --done 提供的完成收尾文本。
 
@@ -113,6 +115,7 @@ def _select_high_level_intent(
     candidates = [
         ("info", info_text),
         ("progress", progress_text),
+        ("warning", warning_text),
         ("urgent", urgent_text),
         ("done", done_text),
     ]
@@ -124,7 +127,7 @@ def _select_high_level_intent(
 
     # 高层策略选项必须互斥，因为每个意图都有不同队列控制动作，混用会让最终语义不可解释。
     if len(selected) > 1:
-        raise typer.BadParameter("only one of --info/--progress/--urgent/--done can be used")
+        raise typer.BadParameter("only one of --info/--progress/--warning/--urgent/--done can be used")
 
     intent, value = selected[0]
     if value is None or not value.strip():
@@ -154,9 +157,9 @@ def _ensure_raw_controls_are_not_mixed_with_policy(
         高层策略和底层控制入口混用时抛出 typer.BadParameter，避免 Agent 误以为底层参数仍会生效。
     """
 
-    # 高层策略文本由 --info/--progress/--urgent/--done 承载，位置参数再传文本会产生双文本歧义。
+    # 高层策略文本由 --info/--progress/--warning/--urgent/--done 承载，位置参数再传文本会产生双文本歧义。
     if text is not None:
-        raise typer.BadParameter("TEXT argument cannot be used together with --info/--progress/--urgent/--done")
+        raise typer.BadParameter("TEXT argument cannot be used together with --info/--progress/--warning/--urgent/--done")
 
     # 高层策略已经固定 event/action，业务意图是阻止调用方绕过策略层直接改底层动作。
     if event != "progress" or action != "enqueue":
@@ -218,7 +221,7 @@ def _format_http_status_error(exc: httpx.HTTPStatusError) -> str:
 @app.callback()
 def send(
     text: Optional[str] = typer.Argument(None, help="Text to speak."),
-    event: str = typer.Option("progress", "--event", help="Event type: started/progress/done/error/interrupt/stop."),
+    event: str = typer.Option("progress", "--event", help="Event type: started/progress/warning/done/error/interrupt/stop."),
     action: str = typer.Option(
         "enqueue", # 默认入队
         "--action",
@@ -231,6 +234,11 @@ def send(
         None,
         "--progress",
         help="Speak progress using replace_pending high-level policy.",
+    ),
+    warning_text: Optional[str] = typer.Option(
+        None,
+        "--warning",
+        help="Speak warning text using clear_pending_then_enqueue high-level policy.",
     ),
     urgent_text: Optional[str] = typer.Option(None, "--urgent", help="Speak urgent text using interrupt policy."),
     done_text: Optional[str] = typer.Option(None, "--done", help="Speak done text using finalization policy."),
@@ -263,7 +271,7 @@ def send(
     向 Runtime 发送语音事件。
 
     核心入参:
-        text/event/action/interrupt_text/stop/info_text/progress_text/urgent_text/done_text/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
+        text/event/action/interrupt_text/stop/info_text/progress_text/warning_text/urgent_text/done_text/wait/role_name/streamvox_json/interrupt_current/host/port/timeout: CLI 事件参数。
 
     预期输出:
         stdout 输出 Runtime 响应 JSON；默认投递后快速返回。
@@ -274,7 +282,7 @@ def send(
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
     metadata = _build_metadata(role_name, streamvox_json, streamvox_json_file)
-    high_level_intent = _select_high_level_intent(info_text, progress_text, urgent_text, done_text)
+    high_level_intent = _select_high_level_intent(info_text, progress_text, warning_text, urgent_text, done_text)
 
     # 高层策略入口优先处理，并拒绝混用底层控制参数，业务意图是给 Agent 一个稳定、少分支的调用面。
     if high_level_intent is not None:
