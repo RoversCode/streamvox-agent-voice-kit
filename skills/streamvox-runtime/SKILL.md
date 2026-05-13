@@ -1,213 +1,80 @@
 ---
 name: streamvox-runtime
-description: Use when the user wants the agent to initialize StreamVox voice behavior, inspect current runtime voice/model/default-role state, or speak short progress, warning, urgent, or done messages through a running local StreamVox runtime.
-when_to_use: Use only after the user has already installed and started streamvox-runtime. Especially relevant when the agent needs to establish runtime state, refresh fingerprint-based session facts, choose a built-in style, or emit a short spoken update instead of text-only progress.
-allowed-tools:
-  - Bash
-  - Read
-  - Grep
-  - Glob
+description: 激活 StreamVox Runtime 语音人格播报模式。根据传入的人格 ID 读取设定，并在关键任务节点使用 streamvox-say 播报带有特定人格风格的状态短句。
+allowed-tools: Bash(streamvox-say *) Bash(streamvox-runtime *)
 ---
 
-# StreamVox Runtime Voice Skill
+# StreamVox Runtime 语音播报模式
 
-## Purpose
+## 1. 状态与能力检查 (阻塞条件)
+如果下方状态异常或能力为空/被禁用，请立即中止语音播报流程，将其视为任务阻塞条件：
 
-This is a host-facing base skill for any agent system that supports `SKILL.md`.
-
-Use it to do two things:
-
-1. Explicitly initialize StreamVox voice behavior after the user has manually started the local runtime.
-2. After initialization, keep runtime facts fresh and emit short spoken updates through stable CLI commands.
-
-## Preconditions
-
-- 用户已经主动安装 `streamvox-agent-voice-kit`
-- 用户已经主动启动 `streamvox-runtime`
-- The host skill is responsible for initialization, state refresh, text planning, and CLI invocation.
-- Runtime is responsible for exposing facts, synthesizing, and playing audio.
-
-Do not treat this skill as an installer or service manager.
-
-## Do Not Do
-
-- 禁止自动安装 `streamvox-agent-voice-kit`
-- 禁止自动下载模型
-- 禁止自动启动 `streamvox-runtime`
-- 禁止自动修改 shell 配置或环境变量
-- 禁止自动激活授权
-- 禁止在没有用户确认的情况下安装依赖
-
-If runtime commands fail, do not try to manage the service yourself.
-
-## Additional Resources
-
-- Read [assets/style-catalog.json](assets/style-catalog.json) only when you need to inspect the built-in styles, pick a `style_id`, or explain how a built-in style maps to model-specific expression.
-- Read [references/models/qwen3-tts-clone.md](references/models/qwen3-tts-clone.md) only when the current runtime model is a Qwen3 TTS Clone variant.
-- Read [references/models/s2-pro.md](references/models/s2-pro.md) only when the current runtime model is `s2-pro`.
-- Read [references/models/voxcpm2.md](references/models/voxcpm2.md) only when the current runtime model is `voxcpm2`.
-
-Keep `SKILL.md` itself as the execution contract. Only open support files when needed.
-
-## Core Contract
-
-- `style` 由本 skill 内置，不和模型绑定
-- 用户只能在宿主侧微调内置 style，不允许新增 style 或覆写模板本体
-- Runtime 只持有事实状态：当前模型、默认音色、已注册音色、公开能力
-- 宿主只持有用户配置：当前激活 style、称呼、自称、强度、播报偏好
-- 单一激活 style
-- 全局只允许一个激活 style
-- Runtime 不可用时，不要中断主任务，继续以文本方式工作
-
-## Execution Workflow
-
-### 1. Initialize Explicitly Once
-
-When the user asks to initialize voice behavior, fetch the current runtime facts first from the stable public runtime endpoints.
-
-### 2. Refresh Facts with Fingerprint
-
-Before a new task or before a key spoken update, refresh the runtime facts from the stable public runtime endpoints when you need them.
-
-### 3. Use Only the Stable CLI Surface
-
-The host should rely on only these stable commands:
-
-```bash
-streamvox-say --intent progress --text "我正在整理调用链"
+### Runtime 状态
+```!
+streamvox-runtime status
 ```
 
-Remember these exact command surfaces:
-
-- `streamvox-say --intent progress --text`
-
-## Built-in Styles
-
-This skill ships with a style catalog:
-
-- [assets/style-catalog.json](assets/style-catalog.json)
-
-v1 built-in `style_id` values:
-
-- `professional_assistant`
-- `earnest_gentle`
-- `strict_teacher`
-- `laid_back_expert`
-- `ancient_swordsman`
-- `seductive_diva`
-- `green_tea_girl`
-- `hotheaded_bro`
-- `extreme_chuunibyou`
-
-Shared rules:
-
-- styles should be distinctive
-- styles should stay dramatic but restrained
-- do not auto-switch style
-- if the next task needs another style, the user must explicitly change it
-
-## Model Differences
-
-- `qwen3`
-  - does not support sub-language style control
-  - style should still exist, but only through text wording
-- `s2-pro`
-  - supports freeform style description
-  - style can be expressed as freeform style guidance
-- `voxcpm2`
-  - supports limited style-language control
-  - style should use a fixed mapping table
-  - the base skill should standardize on `mode=2`
-
-Style always exists. Model capability only changes how style is expressed, not whether style exists.
-
-Runtime startup fixes the current model stream parameters for the whole session.
-
-- do not try to change model-private stream parameters per spoken event
-- if the user wants another runtime stream behavior, they should restart `streamvox-runtime` with another startup configuration
-
-## Speaking Policy
-
-Speak only at high-value moments:
-
-- starting a user-visible long task
-- changing from one phase to another
-- finding a key structure, issue, or conclusion
-- warning the user about a meaningful risk or constraint
-- completing a task with a concise summary
-
-Do not speak for:
-
-- normal file reads
-- high-frequency loop steps
-- tiny internal reasoning updates
-- noisy progress the user can already read directly
-- unstable draft thoughts without a conclusion
-
-Use one short sentence whenever possible.
-
-### Preferred Speak Entry
-
-Prefer the unified intent entry:
-
-```bash
-streamvox-say --intent info --text "我准备开始扫描项目结构"
-streamvox-say --intent progress --text "我已经完成代码结构扫描，正在整理调用链"
-streamvox-say --intent warning --text "我发现当前默认音色和上次初始化结果不一致"
-streamvox-say --intent urgent --text "当前任务需要你先处理一个阻塞问题"
-streamvox-say --intent done --text "我已经完成本轮分析，准备给出结论"
+### Runtime 能力
+```!
+streamvox-runtime capabilities
 ```
+*(注意：此输出是能力的唯一事实源，支持的语言和风格标签必须以此为准。人格设定不能覆盖此技术约束。)*
+后续所有播报文案都必须服从这份文档：
 
-Intent meanings:
+- 支持什么语言，只认它。
+- 支持什么风格标签，只认它。
+- 标签如何使用，只认它。
 
-- `info`
-  - ordinary announcement when a long task begins
-- `progress`
-  - ordinary progress when a phase advances
-- `warning`
-  - user should pay attention, but work can continue
-- `urgent`
-  - interrupt with a new blocking issue or urgent risk
-- `done`
-  - final completion summary
+## 2. 加载人格设定
+当前任务指定的人格 ID 为：**$0**
 
-这里继续保留基础约定：
+- 请读取文件 `references/personality/$0.md` 获取该人格的设定。
+- 如果该文件不存在，明确报告这是无效人格 id，并停止播报。
 
-- `done` 用于任务完成
 
-## Text Guidance
+## 3. 播报触发时机
+无需播报每个微小动作。仅在以下关键节点强制调用播报：
+- 开始执行明显耗时的步骤
+- 发现需要用户注意的风险
+- 出现新的阻塞问题
+- 一个阶段完成
+- 整个任务完成
 
-- Say the result first, then add the smallest necessary qualifier.
-- Keep it spoken and natural, not verbose.
-- Focus on one point at a time.
-- Prefer a summary over a long list.
-- First build a neutral semantic skeleton, then project it into the active style.
-- If the current model does not support some style parameter, degrade only the parameter expression and keep the style itself.
 
-Examples:
+## 4. 播报生成标准流程
+当触发播报时，严格按照以下步骤执行：
+1. **确定 Intent**：从 `info`, `progress`, `warning`, `urgent`, `done` 中选择最贴切的一个。
+2. **生成文案**：基于读取的人格设定生成文案。必须保持称呼一致，信息优先，体现角色味道但拒绝长篇表演。
+3. **能力校验**：确保语言合法，并在必要时插入 0 到 1 个 `capabilities` 中允许的风格标签。
+4. **底线审核**：禁止涉黄、身体接触、情感勒索。如有越界风险，立即降级为客观简短的任务表达。
+5. **执行调用**：使用下方格式输出：
+   `streamvox-say --intent <intent> --text "<你的播报文案>"`
 
-- 好：`我正在读取项目结构`
-- 好：`我找到了 CLI 入口文件`
-- 好：`我发现 Runtime 状态管理可以简化`
-- 好：`我已经完成检查，主要有三个建议`
-- 差：`我现在要先读取项目结构然后继续扫描更多文件之后再看看可能有哪些问题`
+## 5. Intent 路由与文案规则 (核心约束)
+当触发播报时，必须根据当前情境严格对应以下 Intent 规则生成文案：
 
-## Role Rules
+- Intent 不只是语气标签，也是 Runtime 的队列调度语义；选择错误会导致播报顺序和抢占行为不符合预期。
 
-- Do not override the runtime default role by default.
-- Only pass `--role-name` when the user explicitly wants another existing role, or when the current spoken update must use a specific existing role.
-- This base skill does not proactively orchestrate “register a new role”.
-- The host should still understand that runtime supports role registration and default-role switching.
+- **`progress`**  
+  用在已经开始执行明显耗时步骤、后续还可能继续刷新状态的时候。文案要说明当前正在做什么，不要写成总结，因为这类播报会替换旧的待播进度。
 
-## Failure Handling
+- **`warning`**  
+  用在发现风险或注意点、但还没到必须立刻停下的时候。文案要点明风险和后果，让用户尽快注意，但不要写成硬阻塞。
 
-If runtime probing or speaking fails:
+- **`urgent`**  
+  用在出现新的阻塞、继续执行已经没有意义的时候。文案要直接说明为什么现在不能继续，并把注意力拉回到必须先处理的问题上。
 
-- do not block the main task
-- do not keep retrying aggressively in the same task
-- continue in plain text mode
-- only try runtime commands again when a later step actually needs voice behavior
+- **`done`**  
+  用在某个阶段或整个任务已经完成、结果已经可以查看的时候。文案要明确什么已经完成，以及用户现在可以看什么，因为这类播报用于清理旧进度后收尾。
 
-## Final Rule
+- **`info`**  
+  用在补充背景、解释当前情况或说明下一步的时候。文案以客观清楚为主，不强调风险、阻塞或完成，也不要拿它冒充进度更新。
 
-Always trust the current runtime facts from the stable public runtime endpoints more than old assumptions. Do not assume `qwen3`, `s2-pro`, and `voxcpm2` behave the same. Read support files only when the current model or current style decision actually requires them.
+## 6. 人格一致性规则
+
+一旦激活某个人格，整个当前任务阶段都要保持人格一致：
+
+- 默认保持该人格定义的主称呼，不要频繁乱切。
+- 默认保持该人格定义的自称，不要突然换人设口吻。
+- 绿茶人格不能突然冒出暴躁老哥的压迫式口癖。
+- 暴躁老哥人格不能突然切成软妹撒娇邀功。

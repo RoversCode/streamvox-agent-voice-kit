@@ -331,3 +331,6 @@ streamvox-say --intent progress --text "我正在读取项目结构"
 streamvox-say --intent warning --text "我发现这里有风险"
 streamvox-say --intent urgent --text "这里有阻塞问题"
 streamvox-say --intent done --text "我已经处理完成"
+
+
+streamvox-agent capabilities

@@ -153,16 +153,7 @@ def create_app(
         """
 
         return {
-            "status": "running",
-            "model": config.model,
-            "device": config.device,
-            "sample_rate": runtime_speaker.sample_rate,
-            "initialized": runtime_speaker.initialized,
-            "default_role_name": config.default_role_name,
-            "stream_kwargs": dict(config.stream_kwargs or {}),
-            "output": config.audio_backend,
-            "output_dir": str(config.output_dir),
-            "queue": queue.status(),
+            "status": "running"
         }
 
     @app.get("/capabilities", response_class=PlainTextResponse)
