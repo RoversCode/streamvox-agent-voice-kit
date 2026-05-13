@@ -477,60 +477,6 @@ def benchmark(
 
 
 @app.command()
-def describe(
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Keep this flag for symmetry with host skills. The command always prints stable JSON.",
-    ),
-    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
-    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
-    timeout: float = typer.Option(10.0, "--timeout", help="HTTP request timeout seconds."),
-) -> None:
-    """
-    输出面向基础 Skill 的聚合事实快照。
-
-    核心入参:
-        json_output: 占位开关，兼容宿主技能固定调用 `describe --json`。
-        host/port/timeout: Runtime 服务地址与请求超时。
-
-    预期输出:
-        stdout 输出 `/skill/describe` 的稳定 JSON。
-
-    边界异常:
-        Runtime 不可达或请求失败时命令非零退出。
-    """
-
-    # 保留该局部变量，业务意图是显式表明 `--json` 已成为稳定公开接口的一部分。
-    _ = json_output
-    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(_run_client_request(client.skill_describe()))
-
-
-@app.command()
-def fingerprint(
-    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
-    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
-    timeout: float = typer.Option(5.0, "--timeout", help="HTTP request timeout seconds."),
-) -> None:
-    """
-    输出面向基础 Skill 的最小 Runtime 指纹。
-
-    核心入参:
-        host/port/timeout: Runtime 服务地址与请求超时。
-
-    预期输出:
-        stdout 输出只包含 `fingerprint` 的稳定 JSON。
-
-    边界异常:
-        Runtime 不可达或请求失败时命令非零退出。
-    """
-
-    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    _print_json(_run_client_request(client.skill_fingerprint()))
-
-
-@app.command()
 def stop(
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),

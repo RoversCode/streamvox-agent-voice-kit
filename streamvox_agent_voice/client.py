@@ -304,44 +304,6 @@ class VoiceClient:
             response.raise_for_status()
             return response.json()
 
-    async def skill_describe(self) -> dict[str, Any]:
-        """
-        查询 Runtime 面向基础 Skill 的聚合事实快照。
-
-        核心入参:
-            本方法没有入参。
-
-        预期输出:
-            返回 `/skill/describe` 的稳定 JSON 结构。
-
-        边界异常:
-            Runtime 不可达或返回非 2xx 时由 httpx 抛出。
-        """
-
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
-            response = await client.get(f"{self.base_url}/skill/describe")
-            response.raise_for_status()
-            return response.json()
-
-    async def skill_fingerprint(self) -> dict[str, Any]:
-        """
-        查询 Runtime 面向基础 Skill 的最小指纹。
-
-        核心入参:
-            本方法没有入参。
-
-        预期输出:
-            返回只包含 `fingerprint` 的 JSON。
-
-        边界异常:
-            Runtime 不可达或返回非 2xx 时由 httpx 抛出。
-        """
-
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
-            response = await client.get(f"{self.base_url}/skill/fingerprint")
-            response.raise_for_status()
-            return response.json()
-
     async def realtime_selftest(
         self,
         *,

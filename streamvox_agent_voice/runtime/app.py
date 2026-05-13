@@ -22,7 +22,6 @@ from .role_payloads import (
     parse_role_registration_payload,
     parse_role_upload_form,
 )
-from .skill_contract import build_skill_describe_payload, build_skill_fingerprint_payload
 
 
 def create_app(
@@ -74,7 +73,7 @@ def create_app(
             无。
 
         预期输出:
-            返回角色名列表，供 `/roles` 与 `/skill/describe` 复用。
+            返回角色名列表，供 Runtime 公开接口复用。
 
         边界异常:
             引擎未初始化或内部读取失败时抛出 HTTPException(503)。
@@ -162,14 +161,13 @@ def create_app(
             "stream_kwargs": dict(config.stream_kwargs or {}),
             "output": config.audio_backend,
             "output_dir": str(config.output_dir),
-            "capabilities": _current_capabilities(),
             "queue": queue.status(),
         }
 
     @app.get("/capabilities")
     async def capabilities() -> dict[str, Any]:
         """
-        返回当前 Runtime 会话的模型能力快照。
+        返回当前 Runtime 会话的模型能力快照。给AI理解。
 
         核心入参:
             无。
@@ -205,41 +203,6 @@ def create_app(
             "default_role_name": config.default_role_name,
             "roles": roles,
         }
-
-    @app.get("/skill/describe")
-    async def skill_describe() -> dict[str, Any]:
-        """
-        返回面向宿主基础 Skill 的稳定聚合事实快照。
-
-        核心入参:
-            无。
-
-        预期输出:
-            返回指纹、模型关键能力、默认音色、已注册音色和公开命令能力。
-
-        边界异常:
-            当前角色列表读取失败时返回 503。
-        """
-
-        available_roles = await _available_role_names()
-        return build_skill_describe_payload(config, available_role_names=available_roles)
-
-    @app.get("/skill/fingerprint")
-    async def skill_fingerprint() -> dict[str, str]:
-        """
-        返回面向宿主基础 Skill 的最小指纹。
-
-        核心入参:
-            无。
-
-        预期输出:
-            返回只包含 `fingerprint` 的稳定 JSON。
-
-        边界异常:
-            不抛业务异常。
-        """
-
-        return build_skill_fingerprint_payload(config)
 
     @app.post("/selftest/realtime")
     async def realtime_selftest(payload: dict[str, Any] | None = Body(None)) -> dict[str, Any]:

@@ -63,82 +63,23 @@ Keep `SKILL.md` itself as the execution contract. Only open support files when n
 
 ### 1. Initialize Explicitly Once
 
-When the user asks to initialize voice behavior, fetch the runtime fact snapshot first:
-
-```bash
-streamvox-runtime describe --json
-```
-
-From that result, keep two host-side state objects:
-
-- `voice_profile`
-  - `active_style_id`
-  - `user_address`
-  - `self_reference`
-  - `persona_intensity`
-  - `voice_enabled`
-  - `speak_frequency`
-  - `allow_role_override`
-- `session_snapshot`
-  - `fingerprint`
-  - `model.name`
-  - `roles.default_role_name`
-  - `roles.available_role_names`
-  - `model.capabilities`
-  - `runtime.stream_kwargs`
-
-Do not ask the user for runtime facts again if `session_snapshot` is still current.
+When the user asks to initialize voice behavior, fetch the current runtime facts first from the stable public runtime endpoints.
 
 ### 2. Refresh Facts with Fingerprint
 
-Before a new task or before a key spoken update, do a lightweight refresh:
-
-```bash
-streamvox-runtime fingerprint
-```
-
-Rules:
-
-- If the fingerprint is unchanged:
-  - Keep using the current `session_snapshot`.
-- If the fingerprint changed:
-  - Run `streamvox-runtime describe --json` again.
-  - Refresh `session_snapshot`.
-  - Do not reset `voice_profile`.
+Before a new task or before a key spoken update, refresh the runtime facts from the stable public runtime endpoints when you need them.
 
 ### 3. Use Only the Stable CLI Surface
 
 The host should rely on only these stable commands:
 
 ```bash
-streamvox-runtime describe --json
-streamvox-runtime fingerprint
 streamvox-say --intent progress --text "我正在整理调用链"
 ```
 
 Remember these exact command surfaces:
 
-- `streamvox-runtime describe --json`
-- `streamvox-runtime fingerprint`
 - `streamvox-say --intent progress --text`
-
-### 4. Understand What `describe --json` Means
-
-Treat `streamvox-runtime describe --json` as the authoritative runtime fact contract. It should give you:
-
-- `fingerprint`
-- current `model.name`
-- current `model.capabilities`
-- current `roles.default_role_name`
-- current `roles.available_role_names`
-- `roles.capabilities`
-- `runtime.public_commands`
-- `runtime.stream_kwargs`
-
-Treat `streamvox-runtime fingerprint` as a minimal change detector. The current fingerprint is only based on:
-
-- current loaded model identifier
-- current default role name
 
 ## Built-in Styles
 
@@ -269,4 +210,4 @@ If runtime probing or speaking fails:
 
 ## Final Rule
 
-Always trust the current runtime facts from `streamvox-runtime describe --json` more than old assumptions. Do not assume `qwen3`, `s2-pro`, and `voxcpm2` behave the same. Read support files only when the current model or current style decision actually requires them.
+Always trust the current runtime facts from the stable public runtime endpoints more than old assumptions. Do not assume `qwen3`, `s2-pro`, and `voxcpm2` behave the same. Read support files only when the current model or current style decision actually requires them.
