@@ -130,8 +130,17 @@ streamvox-runtime start --model voxcpm2-gguf --streamvox-json-file ./streamvox.j
 ### 最小检查
 
 ```bash
+streamvox-runtime status
+streamvox-runtime capabilities
 streamvox-runtime roles list
 ```
+
+其中：
+
+- `status`
+  - 查看当前 Runtime 是否已完成初始化，以及模型、设备、输出后端和队列状态
+- `capabilities`
+  - 直接输出当前 Runtime 模型对应的能力说明 Markdown 文档，适合给脚本或 Agent 直接阅读
 
 ### 建议检查
 

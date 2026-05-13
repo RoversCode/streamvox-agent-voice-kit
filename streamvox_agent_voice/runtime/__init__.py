@@ -2,6 +2,7 @@
 
 from .app import create_app
 from .config import RuntimeConfig
+from .model_docs import load_model_capabilities_markdown
 from .model_registry import (
     build_capability_snapshot,
     build_model_doctor_report,
@@ -18,6 +19,7 @@ __all__ = [
     "create_app",
     "detect_system_hardware",
     "list_model_profiles",
+    "load_model_capabilities_markdown",
     "recommend_model_profiles",
     "resolve_model_profile",
 ]

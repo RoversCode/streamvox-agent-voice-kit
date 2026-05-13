@@ -285,15 +285,15 @@ class VoiceClient:
             response.raise_for_status()
             return response.json()
 
-    async def capabilities(self) -> dict[str, Any]:
+    async def capabilities(self) -> str:
         """
-        查询当前 Runtime 会话的能力快照。
+        查询当前 Runtime 模型对应的能力说明 Markdown。
 
         核心入参:
             本方法没有入参。
 
         预期输出:
-            返回当前模型能力、Prompt 能力和默认角色等会话状态。
+            返回当前模型对应的 Markdown 原文，不附带任何 JSON 包装。
 
         边界异常:
             Runtime 不可达或返回非 2xx 时由 httpx 抛出。
@@ -302,7 +302,7 @@ class VoiceClient:
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             response = await client.get(f"{self.base_url}/capabilities")
             response.raise_for_status()
-            return response.json()
+            return response.text
 
     async def realtime_selftest(
         self,

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import PlainTextResponse
 
 from ..cli.runtime_probe import DEFAULT_REALTIME_SELFTEST_TEXT, build_streaming_selftest_report
 from ..events import VoiceEvent, VoiceEventError
@@ -14,7 +15,7 @@ from .audio_player import AudioSink, build_audio_sink
 from .audio_assets import temporary_upload_file
 from .config import RuntimeConfig
 from .engine import StreamVoxSpeaker
-from .model_registry import build_capability_snapshot
+from .model_docs import load_model_capabilities_markdown
 from .queue import VoiceEventQueue
 from .role_payloads import (
     parse_default_role_payload,
@@ -49,21 +50,21 @@ def create_app(
     runtime_speaker = speaker or StreamVoxSpeaker(config=config, audio_sink=sink)
     queue = VoiceEventQueue(runtime_speaker)
 
-    def _current_capabilities() -> dict[str, Any]:
+    def _current_capabilities_markdown() -> str:
         """
-        构造当前 Runtime 会话的最新能力快照。
+        读取当前 Runtime 模型对应的能力说明 Markdown。
 
         核心入参:
             无。
 
         预期输出:
-            返回反映当前默认角色等会话态变化的能力字典。
+            返回当前模型在 docs/models 中对应的 Markdown 原文。
 
         边界异常:
-            不抛异常；未知模型时仍返回降级快照。
+            不抛异常；未知模型或文档缺失时返回空字符串。
         """
 
-        return build_capability_snapshot(config)
+        return load_model_capabilities_markdown(config.model)
 
     async def _available_role_names() -> list[str]:
         """
@@ -164,22 +165,26 @@ def create_app(
             "queue": queue.status(),
         }
 
-    @app.get("/capabilities")
-    async def capabilities() -> dict[str, Any]:
+    @app.get("/capabilities", response_class=PlainTextResponse)
+    async def capabilities() -> PlainTextResponse:
         """
-        返回当前 Runtime 会话的模型能力快照。给AI理解。
+        返回当前 Runtime 模型对应的能力说明文档原文。给AI理解。
 
         核心入参:
             无。
 
         预期输出:
-            返回当前模型已解析出的能力摘要，以及会话级默认角色等状态。
+            返回 docs/models 中对应模型的 Markdown 原文，不附带任何 JSON 包装。
 
         边界异常:
-            不抛业务异常；未知模型时返回降级快照。
+            不抛业务异常；未知模型或文档缺失时返回空字符串。
         """
 
-        return _current_capabilities()
+        # 这里显式指定 Markdown 媒体类型，确保调用方把响应体按纯文档而不是 JSON 解析。
+        return PlainTextResponse(
+            content=_current_capabilities_markdown(),
+            media_type="text/markdown; charset=utf-8",
+        )
 
     @app.get("/roles")
     async def roles() -> dict[str, Any]:
