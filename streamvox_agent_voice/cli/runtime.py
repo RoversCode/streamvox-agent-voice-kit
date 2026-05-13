@@ -258,7 +258,11 @@ def _format_model_recommendation_line(model_name: str, status: str) -> str:
 
 @app.command()
 def start(
-    model: str = typer.Option("voxcpm2-gguf", "--model", help="StreamVox model name or local bundle path."),
+    model: str = typer.Option(
+        RuntimeConfig.model,
+        "--model",
+        help="StreamVox model name or local bundle path.",
+    ),
     device: str = typer.Option("auto", "--device", help="StreamVox device: auto/cpu/gpu/gpu:<index>."),
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
@@ -269,6 +273,16 @@ def start(
         None,
         "--default-role-name",
         help="Default role name inherited by events that do not explicitly override role_name.",
+    ),
+    streamvox_json: Optional[str] = typer.Option(
+        None,
+        "--streamvox-json",
+        help="JSON object used as fixed TTSEngine.stream kwargs for the current Runtime session.",
+    ),
+    streamvox_json_file: Optional[str] = typer.Option(
+        None,
+        "--streamvox-json-file",
+        help="Path to a JSON object file used as fixed TTSEngine.stream kwargs for the current Runtime session.",
     ),
     audio_backend: str = typer.Option(
         "speaker",
@@ -286,7 +300,7 @@ def start(
     启动常驻 StreamVox Runtime。
 
     核心入参:
-        model/device/host/port/license/default_role_name/audio_backend/output_dir: Runtime 启动参数。
+        model/device/host/port/license/default_role_name/streamvox_json/audio_backend/output_dir: Runtime 启动参数。
 
     预期输出:
         当前进程启动 uvicorn 服务并保持运行，直到收到 stop/shutdown。
@@ -306,12 +320,22 @@ def start(
             license_path=license_path,
             verify_model_sha256=verify_model_sha256,
             default_role_name=default_role_name,
+            streamvox_json=streamvox_json,
+            streamvox_json_file=streamvox_json_file,
             audio_backend=audio_backend,
             output_dir=output_dir,
         )
         if exit_code < 0:
             exit_code = 128 + abs(exit_code)
         raise typer.Exit(code=exit_code)
+
+    explicit_stream_kwargs = parse_json_object_option(
+        raw_value=streamvox_json,
+        raw_option_name="--streamvox-json",
+        file_path=streamvox_json_file,
+        file_option_name="--streamvox-json-file",
+    )
+    stream_kwargs = explicit_stream_kwargs or RuntimeConfig.builtin_stream_kwargs_for_model(model)
 
     config = RuntimeConfig(
         model=model,
@@ -322,6 +346,7 @@ def start(
         license_path=license_path,
         verify_model_sha256=verify_model_sha256,
         default_role_name=default_role_name,
+        stream_kwargs=stream_kwargs or None,
         audio_backend=audio_backend,
         output_dir=Path(output_dir),
     )
@@ -452,6 +477,60 @@ def benchmark(
 
 
 @app.command()
+def describe(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Keep this flag for symmetry with host skills. The command always prints stable JSON.",
+    ),
+    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
+    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
+    timeout: float = typer.Option(10.0, "--timeout", help="HTTP request timeout seconds."),
+) -> None:
+    """
+    输出面向基础 Skill 的聚合事实快照。
+
+    核心入参:
+        json_output: 占位开关，兼容宿主技能固定调用 `describe --json`。
+        host/port/timeout: Runtime 服务地址与请求超时。
+
+    预期输出:
+        stdout 输出 `/skill/describe` 的稳定 JSON。
+
+    边界异常:
+        Runtime 不可达或请求失败时命令非零退出。
+    """
+
+    # 保留该局部变量，业务意图是显式表明 `--json` 已成为稳定公开接口的一部分。
+    _ = json_output
+    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
+    _print_json(_run_client_request(client.skill_describe()))
+
+
+@app.command()
+def fingerprint(
+    host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
+    port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
+    timeout: float = typer.Option(5.0, "--timeout", help="HTTP request timeout seconds."),
+) -> None:
+    """
+    输出面向基础 Skill 的最小 Runtime 指纹。
+
+    核心入参:
+        host/port/timeout: Runtime 服务地址与请求超时。
+
+    预期输出:
+        stdout 输出只包含 `fingerprint` 的稳定 JSON。
+
+    边界异常:
+        Runtime 不可达或请求失败时命令非零退出。
+    """
+
+    client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
+    _print_json(_run_client_request(client.skill_fingerprint()))
+
+
+@app.command()
 def stop(
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
@@ -556,16 +635,6 @@ def roles_register(
         help="Optional reference transcript override. Omit to let Runtime auto-transcribe the reference audio internally.",
     ),
     set_default: bool = typer.Option(False, "--set-default", help="Set the registered role as the Runtime default role."),
-    streamvox_json: Optional[str] = typer.Option(
-        None,
-        "--streamvox-json",
-        help="JSON object forwarded to TTSEngine.make_prompt as model-specific kwargs.",
-    ),
-    streamvox_json_file: Optional[str] = typer.Option(
-        None,
-        "--streamvox-json-file",
-        help="Path to a JSON object file forwarded to TTSEngine.make_prompt as model-specific kwargs.",
-    ),
     host: str = typer.Option("127.0.0.1", "--host", help="Runtime HTTP host."),
     port: int = typer.Option(8765, "--port", help="Runtime HTTP port."),
     timeout: float = typer.Option(30.0, "--timeout", help="HTTP request timeout seconds."),
@@ -574,7 +643,7 @@ def roles_register(
     注册一个持久化 Prompt 角色。
 
     核心入参:
-        role_name/audio_path/audio_file/audio_data_json/audio_data_file/sample_rate/prompt_text/set_default/streamvox_json/host/port/timeout: 角色注册参数。
+        role_name/audio_path/audio_file/audio_data_json/audio_data_file/sample_rate/prompt_text/set_default/host/port/timeout: 角色注册参数。
 
     预期输出:
         stdout 输出 created 响应。
@@ -600,12 +669,6 @@ def roles_register(
         raise typer.BadParameter("--sample-rate is only valid with --audio-data-json or --audio-data-file")
 
     client = VoiceClient(base_url=_base_url(host, port), timeout=timeout)
-    streamvox = parse_json_object_option(
-        raw_value=streamvox_json,
-        raw_option_name="--streamvox-json",
-        file_path=streamvox_json_file,
-        file_option_name="--streamvox-json-file",
-    ) or None
     if audio_file is not None:
         _print_json(
             _run_client_request(
@@ -614,7 +677,6 @@ def roles_register(
                     audio_file=audio_file,
                     prompt_text=prompt_text,
                     set_default=set_default,
-                    streamvox=streamvox,
                 )
             )
         )
@@ -629,7 +691,6 @@ def roles_register(
                 sample_rate=sample_rate,
                 prompt_text=prompt_text,
                 set_default=set_default,
-                streamvox=streamvox,
             )
         )
     )

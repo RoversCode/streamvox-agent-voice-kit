@@ -8,13 +8,13 @@ from typing import Any
 from uuid import uuid4
 
 
-# 关键常量：公开事件类型必须保持小集合，避免 Agent 随意发明事件导致 Runtime 行为不可预测。
-EVENT_TYPES = frozenset({"started", "progress", "warning", "done", "error", "interrupt", "stop"})
+# 关键常量：公开意图必须保持小集合，避免 Agent 随意发明语义标签导致 Runtime 行为不可预测。
+INTENT_TYPES = frozenset({"info", "progress", "warning", "urgent", "done"})
 
 # 关键常量：优先级只影响队列处理，不直接泄漏到底层 TTS 引擎。
 PRIORITIES = frozenset({"low", "normal", "high"})
 
-# 关键常量：action 是显式控制语义，不能从 event 语义标签隐式推导。
+# 关键常量：action 是显式控制语义，不能从 intent 语义标签隐式推导。
 ACTIONS = frozenset({"enqueue", "interrupt", "stop", "replace_pending", "clear_pending_then_enqueue"})
 
 
@@ -39,8 +39,8 @@ class VoiceEvent:
     Agent 发送给 StreamVox Runtime 的最小语音事件。
 
     核心入参:
-        event: 事件类型，限定为 started/progress/warning/done/error/interrupt/stop。
-        text: 需要播报的文本；stop 事件允许为空。
+        intent: 语义类型，限定为 info/progress/warning/urgent/done。
+        text: 需要播报的文本；stop action 允许为空。
         priority: 队列优先级，限定为 low/normal/high。
         action: 队列控制策略，默认 enqueue。
         interrupt: 是否打断当前播报并清理普通等待队列。
@@ -51,10 +51,10 @@ class VoiceEvent:
         通过 from_mapping 或 validate 构造后，得到可安全进入 Runtime 队列的事件对象。
 
     边界异常:
-        event/priority/text 类型不合法时抛出 VoiceEventError。
+        intent/priority/text 类型不合法时抛出 VoiceEventError。
     """
 
-    event: str = "progress"
+    intent: str = "progress"
     text: str = ""
     priority: str = "normal"  # TODO: 目前没有相关优先级设计，这里先占位
     action: str = "enqueue"
@@ -83,17 +83,12 @@ class VoiceEvent:
         if not isinstance(payload, dict):
             raise VoiceEventError("event payload must be a JSON object")
 
-        # 关键变量：metadata 只允许对象，便于后续安全承载模型参数或 trace 信息。
+        # 关键变量：metadata 只允许对象，便于后续安全承载角色覆盖或 trace 信息。
         metadata = payload.get("metadata", {})
         if metadata is None:
             metadata = {}
         if not isinstance(metadata, dict):
             raise VoiceEventError("metadata must be an object")
-
-        # 关键字段：metadata.streamvox 预留给模型私有参数透传，必须保持对象形态。
-        streamvox_metadata = metadata.get("streamvox")
-        if streamvox_metadata is not None and not isinstance(streamvox_metadata, dict):
-            raise VoiceEventError("metadata.streamvox must be an object")
 
         # 关键字段：role_name 走公开协议时要求是字符串，避免 Runtime 收到不可序列化引用。
         role_name = metadata.get("role_name")
@@ -103,8 +98,8 @@ class VoiceEvent:
             if not role_name.strip():
                 raise VoiceEventError("metadata.role_name must not be empty")
 
-        event = cls(
-            event=str(payload.get("event", "progress")),
+        voice_event = cls(
+            intent=str(payload.get("intent", "progress")),
             text=str(payload.get("text", "")),
             priority=str(payload.get("priority", "normal")),
             action=str(payload.get("action", "enqueue")),
@@ -112,8 +107,8 @@ class VoiceEvent:
             wait=bool(payload.get("wait", False)),
             metadata=metadata,
         )
-        event.validate()
-        return event
+        voice_event.validate()
+        return voice_event
 
     def validate(self) -> None:
         """
@@ -126,12 +121,12 @@ class VoiceEvent:
             合法事件无返回值；非法事件抛出 VoiceEventError。
 
         边界异常:
-            stop 事件允许 text 为空，其余事件必须提供非空文本。
+            stop action 允许 text 为空，其余事件必须提供非空文本。
         """
 
-        # 事件类型必须收敛，避免 Runtime 对未知事件做出错误队列决策。
-        if self.event not in EVENT_TYPES:
-            raise VoiceEventError(f"unsupported event type: {self.event}")
+        # 意图类型必须收敛，避免 Runtime 对未知语义做出错误队列决策。
+        if self.intent not in INTENT_TYPES:
+            raise VoiceEventError(f"unsupported intent type: {self.intent}")
 
         # 优先级必须收敛，避免未来扩展队列策略时出现不可比较的优先级。
         if self.priority not in PRIORITIES:
@@ -141,9 +136,9 @@ class VoiceEvent:
         if self.action not in ACTIONS:
             raise VoiceEventError(f"unsupported action: {self.action}")
 
-        # stop 事件是控制指令，不需要播报文本；其他事件没有文本就没有语音价值。
-        if self.event != "stop" and self.action != "stop" and not self.text.strip():
-            raise VoiceEventError("text is required unless event is stop")
+        # stop action 是控制指令，不需要播报文本；其他请求没有文本就没有语音价值。
+        if self.action != "stop" and not self.text.strip():
+            raise VoiceEventError("text is required unless action is stop")
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -160,7 +155,7 @@ class VoiceEvent:
         """
 
         return {
-            "event": self.event,
+            "intent": self.intent,
             "text": self.text,
             "priority": self.priority,
             "action": self.action,

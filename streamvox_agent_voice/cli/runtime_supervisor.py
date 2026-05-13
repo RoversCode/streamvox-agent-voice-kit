@@ -215,6 +215,8 @@ def run_supervised_start(
     license_path: str | None,
     verify_model_sha256: bool,
     default_role_name: str | None,
+    streamvox_json: str | None,
+    streamvox_json_file: str | None,
     audio_backend: str,
     output_dir: str,
 ) -> int:
@@ -222,7 +224,7 @@ def run_supervised_start(
     在父进程中监督真正的 Runtime 子进程。
 
     核心入参:
-        model/device/host/port/license/default_role_name/audio_backend/output_dir: start 命令的完整启动参数。
+        model/device/host/port/license/default_role_name/streamvox_json/audio_backend/output_dir: start 命令的完整启动参数。
 
     预期输出:
         返回子进程最终退出码；收到中断时会先清理子进程组再返回 130/143。
@@ -240,6 +242,8 @@ def run_supervised_start(
         license_path=license_path,
         verify_model_sha256=verify_model_sha256,
         default_role_name=default_role_name,
+        streamvox_json=streamvox_json,
+        streamvox_json_file=streamvox_json_file,
         audio_backend=audio_backend,
         output_dir=output_dir,
     )
@@ -269,6 +273,8 @@ def build_child_start_command(
     license_path: str | None,
     verify_model_sha256: bool,
     default_role_name: str | None,
+    streamvox_json: str | None,
+    streamvox_json_file: str | None,
     audio_backend: str,
     output_dir: str,
 ) -> list[str]:
@@ -276,7 +282,7 @@ def build_child_start_command(
     构造真正执行 Runtime 的子进程命令。
 
     核心入参:
-        model/device/host/port/license/default_role_name/audio_backend/output_dir: start 命令参数。
+        model/device/host/port/license/default_role_name/streamvox_json/audio_backend/output_dir: start 命令参数。
 
     预期输出:
         返回可传给 subprocess.Popen 的 argv。
@@ -311,6 +317,10 @@ def build_child_start_command(
         command.append("--verify-model-sha256")
     if default_role_name is not None:
         command.extend(["--default-role-name", default_role_name])
+    if streamvox_json is not None:
+        command.extend(["--streamvox-json", streamvox_json])
+    if streamvox_json_file is not None:
+        command.extend(["--streamvox-json-file", streamvox_json_file])
     return command
 
 

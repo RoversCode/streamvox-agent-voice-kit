@@ -15,6 +15,8 @@
 - `GET /status`
 - `GET /capabilities`
 - `GET /roles`
+- `GET /skill/describe`
+- `GET /skill/fingerprint`
 - `POST /events`
 - `POST /roles`
 - `POST /roles/upload`
@@ -29,60 +31,74 @@
 
 适合 Agent 直接使用：
 
-- `--info`
-- `--progress`
-- `--warning`
-- `--urgent`
-- `--done`
+- `--intent info --text`
+- `--intent progress --text`
+- `--intent warning --text`
+- `--intent urgent --text`
+- `--intent done --text`
 - `--stop`
-- `--interrupt`
 
 示例：
 
 ```bash
-streamvox-say --progress "正在读取文件"
-streamvox-say --warning "我发现配置需要你稍后确认"
-streamvox-say --done "处理完成"
-streamvox-say --interrupt "等等，我发现了新问题"
+streamvox-say --intent progress --text "正在读取文件"
+streamvox-say --intent warning --text "我发现配置需要你稍后确认"
+streamvox-say --intent done --text "处理完成"
+streamvox-say --intent urgent --text "等等，我发现了新问题"
 streamvox-say --stop
 ```
+
+默认情况下，`intent` 会映射到固定队列策略：
+
+- `info`
+  - `enqueue`
+- `progress`
+  - `replace_pending`
+- `warning`
+  - `clear_pending_then_enqueue`
+- `urgent`
+  - `interrupt`
+- `done`
+  - `clear_pending_then_enqueue`
 
 ### 底层协议入口
 
 适合需要更细控制的调用方：
 
-- `event`
+- `intent`
 - `action`
 - `wait`
 
 示例：
 
 ```bash
-streamvox-say --event progress --action replace_pending "正在更新进度"
+streamvox-say --intent progress --action replace_pending "正在更新进度"
 ```
+
+一旦显式传了 `--action`，CLI 会直接使用这组底层参数，不再套用高层默认策略。
 
 ## 事件字段
 
-### `event`
+### `intent`
 
 语义标签，不直接等于播放行为。当前常见值：
 
-- `started`
+- `info`
 - `progress`
 - `warning`
+- `urgent`
 - `done`
-- `error`
-- `interrupt`
-- `stop`
 
 推荐语义边界：
 
+- `info`
+  - 用于普通说明
 - `progress`
   - 用于阶段变化
 - `warning`
   - 用于需要用户注意但任务仍可继续
-- `error`
-  - 用于失败或当前动作无法继续
+- `urgent`
+  - 用于需要立即插播的新内容
 - `done`
   - 用于任务完成
 
@@ -120,30 +136,23 @@ streamvox-say --event progress --action replace_pending "正在更新进度"
 streamvox-say --role-name assistant_voice "继续使用这个角色音色播报"
 ```
 
-### `metadata.streamvox`
+### 固定 `stream_kwargs`
 
-`metadata.streamvox` 是模型私有参数透传入口。
+模型私有 `stream(...)` 参数不再通过单条事件传递。
 
-当前建议只把它当成：
+当前公开语义改为：
 
-- 模型私有 `stream(...)` 参数传递层
-- 显式的、可审计的工作流入口
-
-而不是：
-
-- 任意模型通用配置层
-- 永久会话默认配置层
+- 需要模型私有推理参数时
+  - 只能在 `streamvox-runtime start` 时通过 `--streamvox-json` 或 `--streamvox-json-file` 固定
+- Runtime 启动后
+  - 同一会话内的所有播报复用同一组 `stream_kwargs`
+- `/status` 和 `/skill/describe`
+  - 会公开当前固定下来的 `stream_kwargs`
 
 示例：
 
 ```bash
-streamvox-say --streamvox-json '{"language":"Chinese"}' "这条请求显式指定语言"
-```
-
-Windows PowerShell 更推荐：
-
-```powershell
-streamvox-say --streamvox-json-file .\streamvox.json "这条请求通过 JSON 文件传递模型私有参数"
+streamvox-runtime start --streamvox-json '{"mode":"ref"}'
 ```
 
 ## 角色注册协议
@@ -193,6 +202,18 @@ streamvox-runtime roles register memory_voice --audio-data-file ./samples.json -
 ### 5. `control_text` 不是跨模型通用能力
 
 它主要属于 VoxCPM2 工作流。Agent 不应把它当成所有模型都能理解的全局控制字段。
+
+### 6. 旧事件级推理参数入口已经关闭
+
+以下 metadata 入口不再支持：
+
+- `metadata.streamvox`
+- `metadata.language`
+- `metadata.mode`
+- `metadata.control_text`
+- `metadata.track_performance`
+
+如果继续传这些字段，Runtime 会返回 `400`，并提示改用 `streamvox-runtime start --streamvox-json`。
 
 ## 错误语义
 

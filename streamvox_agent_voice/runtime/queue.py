@@ -158,7 +158,7 @@ class VoiceEventQueue:
                 self._drop_all_pending("stopped")
                 self._complete(item, QueueResult(status="stopped", event_id=item.event.id, detail="stop action requested"))
             elif action == "replace_pending":
-                self._drop_pending_by_event(event.event, "replaced")
+                self._drop_pending_by_intent(event.intent, "replaced")
                 self._pending.append(item)
             elif action == "clear_pending_then_enqueue":
                 self._drop_all_pending("cleared")
@@ -279,8 +279,8 @@ class VoiceEventQueue:
         self._stop_event.clear()
 
         try:
-            # stop 作为事件或 action 进入队列时不播报，只执行停止控制并返回。
-            if item.event.event == "stop" or self._effective_action(item.event) == "stop":
+            # stop action 进入队列时不播报，只执行停止控制并返回。
+            if self._effective_action(item.event) == "stop":
                 self._stop_event.set()
                 self._complete(item, QueueResult(status="stopped", event_id=item.event.id))
                 return
@@ -312,7 +312,7 @@ class VoiceEventQueue:
             item = self._pending.popleft()
             self._complete(item, QueueResult(status="skipped", event_id=item.event.id, detail=detail))
 
-    def _drop_pending_by_event(self, event: str, detail: str) -> None:
+    def _drop_pending_by_intent(self, intent: str, detail: str) -> None:
         """
         清理等待队列中同语义类型的事件。
         比如 Agent 先说“正在检索代码”，紧接着又产生“已经定位到 queue 实现”，
@@ -320,14 +320,14 @@ class VoiceEventQueue:
         更合理的是当前正在播的保留，尚未播出的旧 progress 全丢掉，只播最新状态。
 
         核心入参:
-            event: 需要被替换的事件语义标签。
+            intent: 需要被替换的语义标签。
             detail: 写入 QueueResult 的跳过原因。
         """
 
         kept: deque[QueueItem] = deque()
         while self._pending:
             item = self._pending.popleft()
-            if item.event.event == event:  # agent语义级别，而不是action，相同语义剔除，播报最新的
+            if item.event.intent == intent:  # agent语义级别，而不是action，相同语义剔除，播报最新的
                 self._complete(item, QueueResult(status="skipped", event_id=item.event.id, detail=detail))
                 continue
             kept.append(item)

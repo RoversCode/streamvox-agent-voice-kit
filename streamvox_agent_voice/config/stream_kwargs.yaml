@@ -1,0 +1,17 @@
+voxcpm2-gguf:
+  mode: 1
+  control_text: "" # mode 1，走方言可以写这
+  seed: 42
+
+qwen3-tts-clone-0.6b-gguf:
+  language: Chinese
+  icl: False
+  stream: True
+
+qwen3-tts-clone-1.7b-gguf:
+  language: Chinese
+  icl: False
+  stream: True
+
+# s2-pro-4b-gguf没有什么特别的参数需要设置
+s2-pro-4b-gguf: ""

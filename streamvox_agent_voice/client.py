@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .events import VoiceEvent
-from .policy import resolve_voice_policy
+from .policy import HIGH_LEVEL_POLICY_NAMES, resolve_voice_policy
 
 
 class VoiceClient:
@@ -21,7 +20,7 @@ class VoiceClient:
         timeout: 单次 HTTP 请求超时时间；wait=True 时调用方可传更长超时。
 
     预期输出:
-        say/warning/done/error/interrupt 返回 Runtime 的 JSON 响应，stop/status 返回控制接口响应。
+        say/speak_intent/error/interrupt 返回 Runtime 的 JSON 响应，stop/status 返回控制接口响应。
         error 只是语义标签，不隐式打断；interrupt 才是控制快捷方法。
 
     边界异常:
@@ -47,12 +46,11 @@ class VoiceClient:
         self,
         text: str,
         *,
-        event: str = "progress",
+        intent: str = "progress",
         action: str = "enqueue",
         interrupt: bool = False,
         wait: bool = False,
         role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -60,12 +58,11 @@ class VoiceClient:
 
         核心入参:
             text: 需要播报的文本。
-            event: 事件类型，默认 progress。
+            intent: 语义类型，默认 progress。
             action: 显式队列控制策略，默认 enqueue。
             interrupt: 是否打断当前播报。
             wait: 是否等待 Runtime 播报完成。
             role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
             metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
@@ -77,12 +74,11 @@ class VoiceClient:
 
         return await self._send_event(
             text,
-            event=event,
+            intent=intent,
             action=action,
             interrupt=interrupt,
             wait=wait,
             role_name=role_name,
-            streamvox=streamvox,
             metadata=metadata,
         )
 
@@ -90,19 +86,18 @@ class VoiceClient:
         self,
         text: str,
         *,
-        event: str,
+        intent: str,
         action: str,
         interrupt: bool,
         wait: bool,
         role_name: str | None,
-        streamvox: dict[str, Any] | None,
         metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """
         发送内部事件请求。
 
         核心入参:
-            text/event/action/interrupt/wait/role_name/streamvox/metadata: Runtime 底层协议字段。
+            text/intent/action/interrupt/wait/role_name/metadata: Runtime 底层协议字段。
 
         预期输出:
             返回 Runtime JSON 响应；priority 只作为 Runtime 事件结构占位，不在 Client 层开放或选择。
@@ -111,21 +106,14 @@ class VoiceClient:
             本方法会先本地校验 VoiceEvent；HTTP 层失败由 httpx 抛出。
         """
 
-        # 在客户端侧先构造事件，尽早发现非法 event/text/action，减少 Runtime 噪声。
-        # 关键变量：merged_metadata 统一承载公开 metadata、角色覆盖和模型私有透传参数。
+        # 在客户端侧先构造事件，尽早发现非法 intent/text/action，减少 Runtime 噪声。
+        # 关键变量：merged_metadata 统一承载公开 metadata 与角色覆盖。
         merged_metadata = dict(metadata or {})
         if role_name is not None:
             merged_metadata["role_name"] = role_name
 
-        # 模型私有参数始终放在 metadata.streamvox 命名空间下，避免污染公共协议。
-        if streamvox is not None:
-            current_streamvox = merged_metadata.get("streamvox", {})
-            if not isinstance(current_streamvox, dict):
-                raise ValueError("metadata.streamvox must be an object when provided")
-            merged_metadata["streamvox"] = {**current_streamvox, **streamvox}
-
         voice_event = VoiceEvent(
-            event=event,
+            intent=intent,
             text=text,
             action=action,
             interrupt=interrupt,
@@ -135,223 +123,47 @@ class VoiceClient:
         voice_event.validate()  # 参数检验
         return await self._post_json("/events", voice_event.to_payload())
 
-    async def _say_with_policy(
+    async def speak_intent(
         self,
-        policy_name: str,
+        intent: str,
         text: str,
         *,
         wait: bool = False,
         role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        按高层语音策略发送播报事件。
+        按高层意图名称统一发送播报。
 
         核心入参:
-            policy_name: 高层意图名称，例如 info/progress/warning/urgent/done。
+            intent: `info/progress/warning/urgent/done` 之一。
             text: 需要播报的文本。
-            wait: 是否等待 Runtime 播报完成。
+            wait: 是否等待播报完成。
             role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
             metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
-            返回 Runtime JSON 响应；底层 event/action 由策略表统一决定。
+            返回 Runtime JSON 响应；CLI 和宿主 Skill 都可复用这一个入口。
 
         边界异常:
-            未知 policy_name 会抛出 ValueError；HTTP 层失败由 httpx 抛出。
+            未知 intent 会抛出 ValueError。
         """
 
-        # 关键变量：policy 是高层意图的唯一映射来源，避免 Client 方法和 CLI 入口规则漂移。
-        policy = resolve_voice_policy(policy_name)
+        normalized_intent = intent.strip().lower()
+        if normalized_intent not in HIGH_LEVEL_POLICY_NAMES:
+            raise ValueError(f"unsupported high-level intent: {intent}")
+        
+        # 关键变量：policy 是高层意图的唯一映射来源，避免 Client 和 CLI 各自复制一份规则后漂移。
+        policy = resolve_voice_policy(normalized_intent)
 
-        # 策略字段统一从 policy 展开，业务意图是让 Agent 只选择意图，不直接操纵底层队列动作。
         return await self._send_event(
             text,
-            **policy.to_event_kwargs(),
+            **policy.to_request_kwargs(),
             wait=wait,
             role_name=role_name,
-            streamvox=streamvox,
             metadata=metadata,
         )
 
-    async def info(
-        self,
-        text: str,
-        *,
-        wait: bool = False,
-        role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        发送普通说明性播报。
-
-        核心入参:
-            text: 普通说明文本。
-            wait: 是否等待播报完成。
-            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
-            metadata: 附加信息，第一版只透传不解释。
-
-        预期输出:
-            返回 Runtime JSON 响应，默认映射为 progress/enqueue。
-
-        边界异常:
-            同 say。
-        """
-
-        return await self._say_with_policy(
-            "info",
-            text,
-            wait=wait,
-            role_name=role_name,
-            streamvox=streamvox,
-            metadata=metadata,
-        )
-
-    async def progress(
-        self,
-        text: str,
-        *,
-        wait: bool = False,
-        role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        发送可被后续进度覆盖的进度播报。
-
-        核心入参:
-            text: 当前最新进度文本。
-            wait: 是否等待播报完成。
-            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
-            metadata: 附加信息，第一版只透传不解释。
-
-        预期输出:
-            返回 Runtime JSON 响应，默认映射为 progress/replace_pending。
-
-        边界异常:
-            同 say。
-        """
-
-        return await self._say_with_policy(
-            "progress",
-            text,
-            wait=wait,
-            role_name=role_name,
-            streamvox=streamvox,
-            metadata=metadata,
-        )
-
-    async def warning(
-        self,
-        text: str,
-        *,
-        wait: bool = False,
-        role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        发送需要用户注意但任务仍可继续的提醒播报。
-
-        核心入参:
-            text: 需要用户注意的提醒文本。
-            wait: 是否等待播报完成。
-            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
-            metadata: 附加信息，第一版只透传不解释。
-
-        预期输出:
-            返回 Runtime JSON 响应，默认映射为 warning/clear_pending_then_enqueue。
-
-        边界异常:
-            同 say。
-        """
-
-        return await self._say_with_policy(
-            "warning",
-            text,
-            wait=wait,
-            role_name=role_name,
-            streamvox=streamvox,
-            metadata=metadata,
-        )
-
-    async def urgent(
-        self,
-        text: str,
-        *,
-        wait: bool = False,
-        role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        发送必须立刻插播的紧急播报。
-
-        核心入参:
-            text: 紧急提醒、警告或错误文本。
-            wait: 是否等待播报完成。
-            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
-            metadata: 附加信息，第一版只透传不解释。
-
-        预期输出:
-            返回 Runtime JSON 响应，默认映射为 error/interrupt。
-
-        边界异常:
-            同 say。
-        """
-
-        return await self._say_with_policy(
-            "urgent",
-            text,
-            wait=wait,
-            role_name=role_name,
-            streamvox=streamvox,
-            metadata=metadata,
-        )
-
-    async def done(
-        self,
-        text: str,
-        *,
-        wait: bool = False,
-        role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        发送任务完成播报。
-
-        核心入参:
-            text: 完成结果摘要。
-            wait: 是否等待播报完成。
-            role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
-            metadata: 附加信息，第一版只透传不解释。
-
-        预期输出:
-            返回 Runtime JSON 响应，默认映射为 done/clear_pending_then_enqueue。
-
-        边界异常:
-            同 say。
-        """
-
-        # [旧逻辑已废弃]: 旧版 done 只是 event="done" + action="enqueue"，会让完成提示排在过期 progress 后面。
-        # 新策略把完成播报作为自然收尾，清理待播旧消息后再入队当前完成摘要。
-        return await self._say_with_policy(
-            "done",
-            text,
-            wait=wait,
-            role_name=role_name,
-            streamvox=streamvox,
-            metadata=metadata,
-        )
 
     async def error(
         self,
@@ -359,7 +171,6 @@ class VoiceClient:
         *,
         wait: bool = False,
         role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -369,7 +180,6 @@ class VoiceClient:
             text: 错误摘要。
             wait: 是否等待播报完成。
             role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
             metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
@@ -382,12 +192,11 @@ class VoiceClient:
         # error 只是语义标签，不隐式打断队列；调用方需要打断时应显式使用 interrupt(...)。
         return await self._send_event(
             text,
-            event="error",
+            intent="warning",
             action="enqueue",
             interrupt=False,
             wait=wait,
             role_name=role_name,
-            streamvox=streamvox,
             metadata=metadata,
         )
 
@@ -397,7 +206,6 @@ class VoiceClient:
         *,
         wait: bool = False,
         role_name: str | None = None,
-        streamvox: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -407,7 +215,6 @@ class VoiceClient:
             text: 打断时需要立即说出的内容。
             wait: 是否等待播报完成。
             role_name: 单次事件覆盖 Runtime 默认角色的角色名。
-            streamvox: 模型私有参数透传对象，会放入 metadata.streamvox。
             metadata: 附加信息，第一版只透传不解释。
 
         预期输出:
@@ -419,12 +226,11 @@ class VoiceClient:
 
         return await self._send_event(
             text,
-            event="interrupt",
+            intent="urgent",
             action="interrupt",
             interrupt=True,
             wait=wait,
             role_name=role_name,
-            streamvox=streamvox,
             metadata=metadata,
         )
 
@@ -498,6 +304,44 @@ class VoiceClient:
             response.raise_for_status()
             return response.json()
 
+    async def skill_describe(self) -> dict[str, Any]:
+        """
+        查询 Runtime 面向基础 Skill 的聚合事实快照。
+
+        核心入参:
+            本方法没有入参。
+
+        预期输出:
+            返回 `/skill/describe` 的稳定 JSON 结构。
+
+        边界异常:
+            Runtime 不可达或返回非 2xx 时由 httpx 抛出。
+        """
+
+        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            response = await client.get(f"{self.base_url}/skill/describe")
+            response.raise_for_status()
+            return response.json()
+
+    async def skill_fingerprint(self) -> dict[str, Any]:
+        """
+        查询 Runtime 面向基础 Skill 的最小指纹。
+
+        核心入参:
+            本方法没有入参。
+
+        预期输出:
+            返回只包含 `fingerprint` 的 JSON。
+
+        边界异常:
+            Runtime 不可达或返回非 2xx 时由 httpx 抛出。
+        """
+
+        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            response = await client.get(f"{self.base_url}/skill/fingerprint")
+            response.raise_for_status()
+            return response.json()
+
     async def realtime_selftest(
         self,
         *,
@@ -535,7 +379,6 @@ class VoiceClient:
         sample_rate: int | None = None,
         set_default: bool = False,
         persist: bool = True,
-        streamvox: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         向 Runtime 注册一个可复用角色资产。
@@ -548,7 +391,6 @@ class VoiceClient:
             prompt_text: 与参考音频对齐的参考文本；缺失时由 Runtime 自动 ASR。
             set_default: 注册成功后是否立即切为默认角色。
             persist: 当前 Runtime 资产工作流要求为 True。
-            streamvox: 透传给 make_prompt 的模型私有参数。
 
         预期输出:
             返回 Runtime 的 created 响应。
@@ -565,7 +407,6 @@ class VoiceClient:
             prompt_text=prompt_text,
             set_default=set_default,
             persist=persist,
-            streamvox=streamvox,
         )
         return await self._post_json("/roles", payload)
 
@@ -577,7 +418,6 @@ class VoiceClient:
         prompt_text: str | None = None,
         set_default: bool = False,
         persist: bool = True,
-        streamvox: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         通过 multipart 上传本地音频文件注册角色。
@@ -588,7 +428,6 @@ class VoiceClient:
             prompt_text: 可选参考文本；缺失时由 Runtime 自动 ASR。
             set_default: 注册成功后是否立即切为默认角色。
             persist: 当前 Runtime 资产工作流要求为 True。
-            streamvox: 透传给 make_prompt 的模型私有参数。
 
         预期输出:
             返回 Runtime 的 created 响应。
@@ -608,8 +447,6 @@ class VoiceClient:
         }
         if prompt_text is not None:
             data["prompt_text"] = prompt_text
-        if streamvox is not None:
-            data["streamvox_json"] = json.dumps(streamvox, ensure_ascii=False)
 
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             with audio_file_path.open("rb") as audio_handle:
@@ -631,13 +468,12 @@ class VoiceClient:
         prompt_text: str | None,
         set_default: bool,
         persist: bool,
-        streamvox: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """
         构造角色注册请求载荷。
 
         核心入参:
-            role_name/audio_path/audio_data/sample_rate/prompt_text/set_default/persist/streamvox: 角色注册参数。
+            role_name/audio_path/audio_data/sample_rate/prompt_text/set_default/persist: 角色注册参数。
 
         预期输出:
             返回适合发送给 `/roles` 的 JSON 字典。
@@ -673,8 +509,6 @@ class VoiceClient:
             payload["audio_data"] = normalized_audio_data
             payload["sample_rate"] = sample_rate
 
-        if streamvox is not None:
-            payload["streamvox"] = streamvox
         return payload
 
     async def list_roles(self) -> dict[str, Any]:

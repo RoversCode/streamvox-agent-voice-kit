@@ -160,7 +160,6 @@ class StreamVoxSpeaker:
         audio_data: list[float] | None = None,
         sample_rate: int | None = None,
         persist: bool = True,
-        make_prompt_kwargs: dict[str, Any] | None = None,
     ) -> str:
         """
         注册一个可复用的 Prompt 角色资产。
@@ -172,7 +171,6 @@ class StreamVoxSpeaker:
             sample_rate: 内存音频采样率。
             prompt_text: 与参考音频严格对齐的参考文本；缺失时由 Runtime 自动 ASR。
             persist: Runtime 资产工作流目前要求必须落盘缓存。
-            make_prompt_kwargs: 透传给 TTSEngine.make_prompt 的模型私有参数。
 
         预期输出:
             成功时返回 role_name 本身，表示该角色已写入当前模型的角色缓存。
@@ -234,7 +232,7 @@ class StreamVoxSpeaker:
         if not callable(make_prompt):
             raise RuntimeError("StreamVox engine does not support make_prompt")
 
-        kwargs = dict(make_prompt_kwargs or {})
+        kwargs: dict[str, Any] = {}
         if audio_path is not None:
             kwargs["audio_path"] = audio_path
         else:
@@ -277,7 +275,6 @@ class StreamVoxSpeaker:
                 prompt_text=None,
                 audio_path=str(DEMO_ROLE_AUDIO_PATH),
                 persist=True,
-                make_prompt_kwargs=None,
             )
             created = True
 
@@ -481,30 +478,22 @@ class StreamVoxSpeaker:
         构造传给 TTSEngine.stream 的模型参数。
 
         核心入参:
-            event: 当前语音事件，可通过 metadata 传入少量模型参数。
+            event: 当前语音事件，只允许通过 metadata 覆盖 role_name。
 
         预期输出:
             返回安全的 stream kwargs。
 
         边界异常:
-            Runtime 只在这里处理会话级角色语义与少量模型特例；大多数模型私有参数保持透传，交给 StreamVox SDK 自行过滤或校验。
+            旧事件级模型推理参数入口在这里统一拒绝；会话级默认参数和模型特例在这里收口。
         """
 
-        # 所有模型都可以使用性能日志开关；第一版默认关闭，减少 Agent 播报噪声。
         metadata = event.metadata
-
-        # 关键变量：streamvox_metadata 是模型私有参数透传入口，优先级高于旧的平铺 metadata 字段。
-        streamvox_metadata = self._streamvox_metadata(metadata)
-        passthrough = dict(streamvox_metadata)
-        explicit_role_override = "role_name" in metadata or "role_name" in streamvox_metadata
-        kwargs: dict[str, Any] = {
-            "track_performance": bool(
-                passthrough.pop("track_performance", metadata.get("track_performance", False))
-            )
-        }
+        self._reject_legacy_event_stream_params(metadata)
+        explicit_role_override = "role_name" in metadata
+        kwargs: dict[str, Any] = dict(self.config.stream_kwargs or {})
 
         # 角色名是会话级能力的第一步：默认继承 Runtime 配置，事件可显式覆盖。
-        role_name = passthrough.pop("role_name", metadata.get("role_name", self.config.default_role_name))
+        role_name = metadata.get("role_name", self.config.default_role_name)
         if role_name:
             normalized_role_name = str(role_name).strip()
             if not normalized_role_name:
@@ -513,23 +502,12 @@ class StreamVoxSpeaker:
                 self._validate_existing_role_name(normalized_role_name)
             kwargs["role_name"] = normalized_role_name
 
-        # language 继续保留旧入口，兼容 Qwen3 和其他已知多语言模型的常见调用方式。
-        if "language" in passthrough:
-            kwargs["language"] = passthrough.pop("language")
-        elif "language" in metadata:
-            kwargs["language"] = metadata["language"]
-
         # 只有已知是 VoxCPM2 的模型，才在缺省时补一个 mode=text。
-        # 这里不再维护会话级默认 control_text；该能力应由单次推理显式决定是否传入。
         profile = resolve_model_profile(self.config.model)
-        if profile is not None and profile.name == "voxcpm2-gguf":
-            mode = passthrough.pop("mode", metadata.get("mode", "text"))
-            kwargs["mode"] = str(mode)
+        if profile is not None and profile.name == "voxcpm2-gguf" and "mode" not in kwargs:
+            kwargs["mode"] = "text"
 
-        # 最后再把剩余模型私有参数直接透传到底层 SDK，避免公共协议被所有模型细节污染。
-        kwargs.update(passthrough)
-
-        # 这里只保留 Runtime 自己必须维护的少量语义校验，其余模型私有参数交给 SDK。
+        # 启动期固定的参数在这里做统一校验，避免直到真正播报时才暴露明显冲突。
         if profile is not None:
             profile.validate_stream_request(stream_kwargs=kwargs)
         return kwargs
@@ -549,14 +527,15 @@ class StreamVoxSpeaker:
         """
 
         profile = resolve_model_profile(self.config.model)
-        stream_kwargs: dict[str, Any] = {
-            "track_performance": False,
-        }
+        stream_kwargs: dict[str, Any] = dict(self.config.stream_kwargs or {})
 
         # 这里优先测“真实会话最可能使用的推理路径”，而不是只测一个脱离角色资产的裸文本模式。
         stream_kwargs["role_name"] = role_name
         if profile is not None and profile.name == "voxcpm2-gguf":
             stream_kwargs["mode"] = "ref"
+        elif "mode" in stream_kwargs:
+            stream_kwargs = dict(stream_kwargs)
+            stream_kwargs.pop("mode", None)
 
         if profile is not None:
             profile.validate_stream_request(stream_kwargs=stream_kwargs)
@@ -595,24 +574,28 @@ class StreamVoxSpeaker:
             "no available role for realtime selftest; please pass --role-name or ensure demo_role/default role exists"
         )
 
-    def _streamvox_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+    def _reject_legacy_event_stream_params(self, metadata: dict[str, Any]) -> None:
         """
-        提取模型私有参数透传对象。
+        拒绝旧版事件级模型推理参数入口。
 
         核心入参:
             metadata: 事件级公开 metadata。
 
         预期输出:
-            返回 `metadata.streamvox` 对象；缺失或类型不对时返回空字典。
+            未命中旧入口时无返回值。
 
         边界异常:
-            本方法不抛异常，协议合法性由 VoiceEvent 校验层负责。
+            命中已废弃字段时抛出 ValueError，引导调用方改用 Runtime 启动期固定参数。
         """
 
-        value = metadata.get("streamvox", {})
-        if isinstance(value, dict):
-            return value
-        return {}
+        if "streamvox" in metadata:
+            raise ValueError("metadata.streamvox is no longer supported; use streamvox-runtime start --streamvox-json")
+
+        for field_name in ("language", "mode", "control_text", "track_performance"):
+            if field_name in metadata:
+                raise ValueError(
+                    f"metadata.{field_name} is no longer supported; use streamvox-runtime start --streamvox-json"
+                )
 
     def _coerce_stream_chunk(self, chunk: object) -> np.ndarray:
         """

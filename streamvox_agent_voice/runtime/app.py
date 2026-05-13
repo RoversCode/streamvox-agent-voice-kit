@@ -22,6 +22,7 @@ from .role_payloads import (
     parse_role_registration_payload,
     parse_role_upload_form,
 )
+from .skill_contract import build_skill_describe_payload, build_skill_fingerprint_payload
 
 
 def create_app(
@@ -64,6 +65,25 @@ def create_app(
         """
 
         return build_capability_snapshot(config)
+
+    async def _available_role_names() -> list[str]:
+        """
+        读取当前模型缓存中的全部角色名。
+
+        核心入参:
+            无。
+
+        预期输出:
+            返回角色名列表，供 `/roles` 与 `/skill/describe` 复用。
+
+        边界异常:
+            引擎未初始化或内部读取失败时抛出 HTTPException(503)。
+        """
+
+        try:
+            return await asyncio.to_thread(runtime_speaker.list_roles)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -139,6 +159,7 @@ def create_app(
             "sample_rate": runtime_speaker.sample_rate,
             "initialized": runtime_speaker.initialized,
             "default_role_name": config.default_role_name,
+            "stream_kwargs": dict(config.stream_kwargs or {}),
             "output": config.audio_backend,
             "output_dir": str(config.output_dir),
             "capabilities": _current_capabilities(),
@@ -177,16 +198,48 @@ def create_app(
             引擎未初始化时返回 503。
         """
 
-        try:
-            roles = await asyncio.to_thread(runtime_speaker.list_roles)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        roles = await _available_role_names()
 
         return {
             "model": config.model,
             "default_role_name": config.default_role_name,
             "roles": roles,
         }
+
+    @app.get("/skill/describe")
+    async def skill_describe() -> dict[str, Any]:
+        """
+        返回面向宿主基础 Skill 的稳定聚合事实快照。
+
+        核心入参:
+            无。
+
+        预期输出:
+            返回指纹、模型关键能力、默认音色、已注册音色和公开命令能力。
+
+        边界异常:
+            当前角色列表读取失败时返回 503。
+        """
+
+        available_roles = await _available_role_names()
+        return build_skill_describe_payload(config, available_role_names=available_roles)
+
+    @app.get("/skill/fingerprint")
+    async def skill_fingerprint() -> dict[str, str]:
+        """
+        返回面向宿主基础 Skill 的最小指纹。
+
+        核心入参:
+            无。
+
+        预期输出:
+            返回只包含 `fingerprint` 的稳定 JSON。
+
+        边界异常:
+            不抛业务异常。
+        """
+
+        return build_skill_fingerprint_payload(config)
 
     @app.post("/selftest/realtime")
     async def realtime_selftest(payload: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
@@ -236,7 +289,7 @@ def create_app(
         注册一个可复用的 Prompt 角色资产。
 
         核心入参:
-            payload: 角色名、参考音频路径、参考文本和模型私有 make_prompt 参数。
+            payload: 角色名、参考音频路径、参考文本和默认角色切换参数。
 
         预期输出:
             成功时返回 created、角色名和当前默认角色。
@@ -259,7 +312,6 @@ def create_app(
                 sample_rate=request["sample_rate"],
                 prompt_text=request["prompt_text"],
                 persist=request["persist"],
-                make_prompt_kwargs=request["streamvox"],
             )
             if request["set_default"]:
                 await asyncio.to_thread(runtime_speaker.set_default_role_name, role_name)
@@ -282,13 +334,12 @@ def create_app(
         prompt_text: str | None = Form(None),
         persist: str = Form("true"),
         set_default: str = Form("false"),
-        streamvox_json: str | None = Form(None),
     ) -> dict[str, Any]:
         """
         通过 multipart 上传文件注册一个可复用角色资产。
 
         核心入参:
-            role_name/audio_file/prompt_text/persist/set_default/streamvox_json: 表单形式的角色注册参数。
+            role_name/audio_file/prompt_text/persist/set_default: 表单形式的角色注册参数。
 
         预期输出:
             成功时返回 created、角色名和当前默认角色。
@@ -303,7 +354,6 @@ def create_app(
                 prompt_text=prompt_text,
                 persist=persist,
                 set_default=set_default,
-                streamvox_json=streamvox_json,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -318,7 +368,6 @@ def create_app(
                     sample_rate=None,
                     prompt_text=request["prompt_text"],
                     persist=request["persist"],
-                    make_prompt_kwargs=request["streamvox"],
                 )
             if request["set_default"]:
                 await asyncio.to_thread(runtime_speaker.set_default_role_name, created_role_name)
@@ -419,11 +468,10 @@ def create_app(
         TODO: 理解中间的笔记，后续删除：
         
         streamvox-say "我正在整理答案，请稍等" 
-        payload -> {'event': 'progress', 'text': '我正在整理答案，请稍等', 'priority': 'normal', 'action': 'enqueue', 'interrupt': False, 'wait': False, 'metadata': {}}
+        payload -> {'intent': 'progress', 'text': '我正在整理答案，请稍等', 'priority': 'normal', 'action': 'enqueue', 'interrupt': False, 'wait': False, 'metadata': {}}
         
         
         '''
-        print(f"当前请求体：{payload}")
         try:
             event = VoiceEvent.from_mapping(payload)
         except VoiceEventError as exc:
@@ -442,10 +490,12 @@ def create_app(
             item = await queue.enqueue(event) # event是一个VoiceEvent
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-
+        
+        # 如果wait为False，不等播放结果
         if not event.wait:
             return {"status": "accepted", "event_id": event.id}
-
+        
+        # wait为Trues，等item.future任务处理完，才能返回。
         result = await item.future
         return result.to_payload()
 

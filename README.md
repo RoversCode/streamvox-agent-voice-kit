@@ -83,16 +83,47 @@ streamvox-runtime start --model voxcpm2-gguf --device auto --output null
 streamvox-runtime start --model voxcpm2-gguf --device auto --output wav --output-dir ./streamvox_outputs
 ```
 
+如果你启动时只给了 `--model`，但没有显式传 `--streamvox-json` 或 `--streamvox-json-file`：
+
+- Runtime 会自动从 `streamvox_agent_voice/config/stream_kwargs.yaml`
+- 按当前模型名读取默认推理参数
+
+如果你连 `--model` 都不传：
+
+- Runtime 默认启动 `qwen3-tts-clone-0.6b-gguf`
+- 并自动读取 `streamvox_agent_voice/config/stream_kwargs.yaml` 里这个模型对应的默认推理参数
+
+### 启动时固定推理参数
+
+```bash
+streamvox-runtime start --model voxcpm2-gguf --streamvox-json '{"mode":"ref", "control_text": "闽南语"}' --device auto --output wav --output-dir ./streamvox_outputs
+```
+
+如果参数较长，更推荐文件入口：
+
+```bash
+streamvox-runtime start --model voxcpm2-gguf --streamvox-json-file ./streamvox.json
+```
+
+这里的 `--streamvox-json*` 只在 Runtime 启动时生效：
+
+- 当前会话里的所有播报都会复用这组固定 `stream(...)` 参数
+- `streamvox-say` 不再支持按单条事件覆盖模型推理参数
+- 如果启动时不传，Runtime 会先尝试从 `streamvox_agent_voice/config/stream_kwargs.yaml` 按模型读取默认值
+- 如果该模型在 YAML 里没有配置，再回退到当前模型自己的默认推理行为
+
 常用启动参数：
 
 - `--model`
-  - 模型名或本地模型目录
+  - 模型名或本地模型目录；默认是 `qwen3-tts-clone-0.6b-gguf`
 - `--device`
   - 常用值是 `auto`、`cpu`、`gpu`、`gpu:<index>`
 - `--output`
   - 常用值是 `speaker`、`null`、`wav`
 - `--output-dir`
   - 当输出模式是 `wav` 时指定音频输出目录
+- `--streamvox-json` / `--streamvox-json-file`
+  - 在 Runtime 启动时固定当前会话的模型推理参数
 
 ## 安装后先做自检
 
@@ -159,47 +190,52 @@ streamvox-runtime roles delete assistant_voice
 ### 最简单的播报
 
 ```bash
-streamvox-say "我正在整理答案，请稍等"
+streamvox-say "我正在整理答案，请稍等。"   # 我咧整理答案，等我一下哦。  我正在整理答案，请稍等
 ```
 
 ### 推荐使用高层事件接口
 
 ```bash
-streamvox-say --progress "我正在读取项目结构"
-streamvox-say --warning "我发现有一项配置需要你稍后确认"
-streamvox-say --done "检查已经完成"
+streamvox-say --intent progress --text "我正在读取项目结构"
+streamvox-say --intent warning --text "我发现有一项配置需要你稍后确认"
+streamvox-say --intent done --text "检查已经完成"
 ```
 
 ### 指定角色播报
 
 ```bash
-streamvox-say --role-name assistant_voice --progress "现在使用指定角色播报"
+streamvox-say --role-name assistant_voice --intent progress --text "现在使用指定角色播报"
 ```
 
 ### 等待当前事件播报完成
 
 ```bash
-streamvox-say --done "处理完成" --wait
+streamvox-say --intent done --text "处理完成" --wait
 ```
 
 ### 中断当前播报
 
 ```bash
-streamvox-say --interrupt "请先处理更紧急的任务"
+streamvox-say --intent urgent --text "请先处理更紧急的任务"
 streamvox-say --stop
 ```
 
+如果你显式传了 `--action`，CLI 会把它当成底层队列控制入口：
+
+- 不再使用 `intent` 对 `action` 的默认映射
+- 适合脚本或调试场景
+
 高层事件建议这样理解：
 
-- `--progress`
+- `progress`
   - 适合阶段推进中的普通进展
-- `--warning`
+- `warning`
   - 适合提醒用户注意，但任务还能继续
-- `--done`
+- `done`
   - 适合任务收尾
-- `--urgent`
+- `urgent`
   - 适合需要立即插播的新内容
-- `--info`
+- `info`
   - 适合普通说明
 
 ## 给 Agent 安装 skill
@@ -280,3 +316,9 @@ streamvox-runtime roles set-default assistant_voice
 ```bash
 streamvox-say --role-name assistant_voice "你好"
 ```
+
+streamvox-say --intent info --text "我开始处理了"
+streamvox-say --intent progress --text "我正在读取项目结构"
+streamvox-say --intent warning --text "我发现这里有风险"
+streamvox-say --intent urgent --text "这里有阻塞问题"
+streamvox-say --intent done --text "我已经处理完成"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 
@@ -14,7 +13,7 @@ def parse_role_registration_payload(payload: dict[str, Any]) -> dict[str, Any]:
         payload: HTTP JSON 请求体。
 
     预期输出:
-        返回 role_name、audio_path/audio_data、sample_rate、prompt_text、persist、set_default 和 streamvox 字段。
+        返回 role_name、audio_path/audio_data、sample_rate、prompt_text、persist 和 set_default 字段。
 
     边界异常:
         字段缺失、类型错误或音频来源冲突时抛出 ValueError。
@@ -46,7 +45,6 @@ def parse_role_registration_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     persist = _parse_required_boolean(payload.get("persist", True), field_name="persist")
     set_default = _parse_required_boolean(payload.get("set_default", False), field_name="set_default")
-    streamvox = _parse_optional_object(payload.get("streamvox"), field_name="streamvox")
 
     return {
         "role_name": role_name,
@@ -56,7 +54,6 @@ def parse_role_registration_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "prompt_text": prompt_text,
         "persist": persist,
         "set_default": set_default,
-        "streamvox": streamvox,
     }
 
 
@@ -66,7 +63,6 @@ def parse_role_upload_form(
     prompt_text: Any,
     persist: Any,
     set_default: Any,
-    streamvox_json: Any,
 ) -> dict[str, Any]:
     """
     解析并校验 multipart 角色注册表单。
@@ -76,7 +72,6 @@ def parse_role_upload_form(
         prompt_text: 可选参考文本；缺失时由 Runtime 触发自动 ASR。
         persist: 表单里的持久化标记。
         set_default: 表单里的默认角色切换标记。
-        streamvox_json: 模型私有 `make_prompt` 参数 JSON 字符串。
 
     预期输出:
         返回标准化后的注册参数字典。
@@ -90,7 +85,6 @@ def parse_role_upload_form(
         "prompt_text": _parse_optional_string(prompt_text, field_name="prompt_text"),
         "persist": _parse_form_boolean(persist, field_name="persist"),
         "set_default": _parse_form_boolean(set_default, field_name="set_default"),
-        "streamvox": _parse_optional_json_object_string(streamvox_json, field_name="streamvox_json"),
     }
 
 
@@ -219,62 +213,6 @@ def _parse_form_boolean(value: Any, *, field_name: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{field_name} must be a boolean or boolean-like string")
-
-
-def _parse_optional_object(value: Any, *, field_name: str) -> dict[str, Any]:
-    """
-    解析可选 JSON 对象字段。
-
-    核心入参:
-        value: 任意输入值。
-        field_name: 当前字段名。
-
-    预期输出:
-        缺失时返回空字典，存在时返回对象本身。
-
-    边界异常:
-        类型错误时抛出 ValueError。
-    """
-
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"{field_name} must be an object")
-    return value
-
-
-def _parse_optional_json_object_string(value: Any, *, field_name: str) -> dict[str, Any]:
-    """
-    解析表单里的可选 JSON 对象字符串。
-
-    核心入参:
-        value: 字符串形式的 JSON，或空值。
-        field_name: 当前字段名。
-
-    预期输出:
-        返回字典；缺失时返回空字典。
-
-    边界异常:
-        JSON 非法或不是对象时抛出 ValueError。
-    """
-
-    if value is None:
-        return {}
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a JSON object string")
-
-    normalized = value.strip()
-    if not normalized:
-        return {}
-
-    try:
-        payload = json.loads(normalized)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{field_name} must contain valid JSON: {exc}") from exc
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"{field_name} must decode to a JSON object")
-    return payload
 
 
 def _parse_string_or_string_list(value: Any, *, field_name: str) -> str | list[str]:

@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
+from typing import Any
+
+from hyperpyyaml import load_hyperpyyaml
+
+
+# 关键常量：当前 Runtime 在未显式传参时默认启动 qwen3-tts-clone-0.6b-gguf。
+DEFAULT_RUNTIME_MODEL = "qwen3-tts-clone-0.6b-gguf"
+
+# 关键常量：模型默认 stream kwargs 固定从仓库内配置资产读取，避免散落在 CLI 或引擎实现里。
+_STREAM_KWARGS_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "stream_kwargs.yaml"
 
 
 @dataclass(slots=True)
@@ -21,6 +32,7 @@ class RuntimeConfig:
         license_path: 离线授权路径，可为空。
         verify_model_sha256: 是否校验模型文件 sha256。
         default_role_name: Runtime 启动后默认继承的角色名，可为空。
+        stream_kwargs: Runtime 启动时固定下来的模型推理参数。
         audio_backend: 流式输出后端，第一版支持 speaker/null，兼容 sounddevice 旧别名。
         output_dir: 文件型输出 sink 的目录，例如 wav。
 
@@ -31,7 +43,7 @@ class RuntimeConfig:
         本类不做复杂校验，CLI 和 Runtime 入口负责处理不可用后端或端口。
     """
 
-    model: str = "voxcpm2-gguf"
+    model: str = DEFAULT_RUNTIME_MODEL
     device: str = "auto"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -39,6 +51,7 @@ class RuntimeConfig:
     license_path: str | None = None
     verify_model_sha256: bool = False
     default_role_name: str | None = None
+    stream_kwargs: dict[str, Any] | None = None
     audio_backend: str = "speaker"
     output_dir: Path = Path("streamvox_outputs")
 
@@ -72,12 +85,50 @@ class RuntimeConfig:
             license_path=getenv("STREAMVOX_LICENSE_PATH"),
             verify_model_sha256=getenv("STREAMVOX_VERIFY_MODEL_SHA256", "0") == "1",
             default_role_name=getenv("STREAMVOX_AGENT_VOICE_DEFAULT_ROLE_NAME"),
+            stream_kwargs=None,
             audio_backend=getenv(
                 "STREAMVOX_AGENT_VOICE_OUTPUT",
                 getenv("STREAMVOX_AGENT_VOICE_AUDIO_BACKEND", defaults.audio_backend),
             ),
             output_dir=Path(getenv("STREAMVOX_AGENT_VOICE_OUTPUT_DIR", str(defaults.output_dir))),
         )
+
+    @staticmethod
+    def builtin_stream_kwargs_for_model(model_name: str) -> dict[str, Any]:
+        """
+        读取某个模型在仓库内置配置里的默认推理参数。
+
+        核心入参:
+            model_name: Runtime 当前模型名。
+
+        预期输出:
+            返回一份可安全修改的 `stream_kwargs` 字典；未配置时返回空字典。
+
+        边界异常:
+            配置文件缺失、YAML 非法或目标模型配置不是对象时抛出 RuntimeError。
+        """
+
+        if not isinstance(model_name, str) or not model_name.strip():
+            raise RuntimeError("model_name must be a non-empty string when loading builtin stream kwargs")
+
+        if not _STREAM_KWARGS_CONFIG_PATH.is_file():
+            raise RuntimeError(f"builtin stream kwargs config was not found: {_STREAM_KWARGS_CONFIG_PATH}")
+
+        try:
+            with _STREAM_KWARGS_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+                raw_catalog = load_hyperpyyaml(handle)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"failed to load builtin stream kwargs config: {exc}") from exc
+
+        if not isinstance(raw_catalog, dict):
+            raise RuntimeError("builtin stream kwargs config must decode to an object")
+
+        raw_value = raw_catalog.get(model_name.strip(), {})
+        if raw_value in (None, ""):
+            return {}
+        if not isinstance(raw_value, dict):
+            raise RuntimeError(f"builtin stream kwargs for model {model_name} must be an object")
+        return deepcopy(raw_value)
 
     @property
     def base_url(self) -> str:

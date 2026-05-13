@@ -120,13 +120,13 @@ async def run_runtime_selftest(
         # 先发一条非阻塞 progress，验证队列接收与排队语义。
         progress_step = await measure_probe_step(
             "progress_ack",
-            lambda: client.progress(progress_text, wait=False, role_name=role_name),
+            lambda: client.say(progress_text, intent="progress", action="replace_pending", wait=False, role_name=role_name),
         )
 
         # 再发一条 wait=True 的完成事件，验证完整合成链路可以走通。
         done_step = await measure_probe_step(
             "done_completion",
-            lambda: client.done(done_text, wait=True, role_name=role_name),
+            lambda: client.say(done_text, intent="done", action="clear_pending_then_enqueue", wait=True, role_name=role_name),
         )
         steps.extend([progress_step, done_step])
         speech_step_names.extend([progress_step.name, done_step.name])
@@ -248,7 +248,7 @@ async def run_runtime_benchmark(
         # 统一使用 done 作为收尾播报，避免 progress 在队列中被后续同类事件替换。
         completion_step = await measure_probe_step(
             f"done_completion_{index + 1}",
-            lambda: client.done(text, wait=True, role_name=role_name),
+            lambda: client.say(text, intent="done", action="clear_pending_then_enqueue", wait=True, role_name=role_name),
         )
         completion_payload = completion_step.to_payload()
 
