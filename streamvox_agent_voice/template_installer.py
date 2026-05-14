@@ -17,6 +17,11 @@ SUPPORTED_AGENT_TARGETS = ("codex", "claude-code")
 # 关键常量：内置模板源固定放在仓库根目录 `skills/`，而不是 Python 包目录。
 SKILLS_SOURCE_ROOT = Path(__file__).resolve().parent.parent / "skills"
 
+# 关键常量：Windows 上有一部分读取链路会把无 BOM 的参考 Markdown 误判成本地编码；
+# 但入口 `SKILL.md` 必须与 Codex 现有 skill 保持一致的无 BOM 形式，避免影响 skill 发现。
+UTF8_BOM_MARKDOWN_SUFFIXES = {".md"}
+SKILL_ENTRY_FILENAME = "SKILL.md"
+
 
 def builtin_skill_source() -> Path:
     """
@@ -176,4 +181,48 @@ def _copy_resource_tree(*, source: Path, destination: Path) -> None:
             _copy_resource_tree(source=child, destination=destination / child.name)
         return
 
+    # 参考 Markdown 会被外部 Agent 与 Windows Shell 直接读取；这里按白名单补 BOM，
+    # 但主入口 `SKILL.md` 必须维持无 BOM，避免破坏 Codex 的 skill 识别。
+    if _should_write_utf8_bom(source):
+        _copy_text_resource_with_utf8_bom(source=source, destination=destination)
+        return
+
     destination.write_bytes(source.read_bytes())
+
+
+def _should_write_utf8_bom(source: Path) -> bool:
+    """
+    判断当前资源文件是否应在安装时写成带 UTF-8 BOM 的文本。
+
+    核心入参:
+        source: 当前正在复制的模板源文件路径。
+
+    预期输出:
+        当文件属于会被 Agent 协议读取的 Markdown 文档时返回 True；否则返回 False。
+
+    边界异常:
+        不抛异常，只做基于文件后缀的轻量判断。
+    """
+
+    # 这里只对白名单文本后缀生效，且显式排除技能入口文件，业务意图是兼顾 Windows 文本兼容与 Codex skill 发现。
+    return source.suffix.lower() in UTF8_BOM_MARKDOWN_SUFFIXES and source.name != SKILL_ENTRY_FILENAME
+
+
+def _copy_text_resource_with_utf8_bom(*, source: Path, destination: Path) -> None:
+    """
+    以 UTF-8 BOM 形式复制单个文本模板文件。
+
+    核心入参:
+        source: 模板源文件路径，要求内容本身是 UTF-8 文本。
+        destination: 目标输出路径。
+
+    预期输出:
+        目标文件内容与源文件文本一致，但文件头显式包含 UTF-8 BOM。
+
+    边界异常:
+        当源文件不是合法 UTF-8 文本时抛出 UnicodeDecodeError，避免静默把错误内容继续传播到用户目录。
+    """
+
+    # 先按仓库约定的 UTF-8 读取原文，再显式写成 utf-8-sig，业务意图是保留文本内容同时补上 BOM 编码锚点。
+    source_text = source.read_text(encoding="utf-8")
+    destination.write_text(source_text, encoding="utf-8-sig")
