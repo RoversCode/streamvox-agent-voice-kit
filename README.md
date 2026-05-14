@@ -2,17 +2,10 @@
     <h1>StreamVox Agent Voice Kit</h1>
     <p><strong>基于 StreamVox SDK 的本地 Agent 语音播报工具</strong></p>
     <p>
-        <a href="https://item.taobao.com/item.htm?ft=t&id=1044813462201&spm=a21dvs.23580594.0.0.6781645ez4U7cp">
+        <a href="https://e.tb.cn/h.iABy1AGhcFcpz4G?tk=3ajd5pJJVO1">
             <img alt="SDK Key 购买" src="https://img.shields.io/badge/SDK%20Key-%E8%B4%AD%E4%B9%B0%E9%93%BE%E6%8E%A5-ff6a00?style=for-the-badge">
         </a>
         <img alt="QQ 交流群" src="https://img.shields.io/badge/QQ%E4%BA%A4%E6%B5%81%E7%BE%A4-1097818796-12b886?style=for-the-badge">
-        <img alt="Trial" src="https://img.shields.io/badge/Trial-%E5%85%88%E6%B5%8B%E5%90%8E%E4%B9%B0-228be6?style=for-the-badge">
-    </p>
-    <p>
-        <strong>SDK Key 购买：</strong>
-        <a href="https://item.taobao.com/item.htm?ft=t&id=1044813462201&spm=a21dvs.23580594.0.0.6781645ez4U7cp">淘宝授权入口</a>
-        &nbsp;&nbsp; | &nbsp;&nbsp;
-        <strong>QQ 交流群：</strong>1097818796
     </p>
 </div>
 
