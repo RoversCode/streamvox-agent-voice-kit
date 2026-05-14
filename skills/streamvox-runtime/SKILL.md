@@ -1,7 +1,12 @@
 ---
 name: streamvox-runtime
-description: 激活 StreamVox Runtime 语音人格播报模式。根据传入的人格 ID 读取设定，并在关键任务节点使用 streamvox-say 播报带有特定人格风格的状态短句。
-allowed-tools: Bash(streamvox-say *) Bash(streamvox-runtime *)
+description: 当任务已经提供 persona id，且进入耗时步骤开始、风险提示、阻塞、阶段完成或整体完成等关键节点，需要调用 streamvox-say 进行人格化语音播报时使用。
+when_to_use: 仅在需要实际执行 StreamVox Runtime 语音播报时自动使用。适用于已有 persona id 且出现明显新状态的场景，包括开始执行耗时步骤、发现需要提醒的风险、出现新的阻塞、阶段完成、整体完成。不适用于普通文本回复、缺少 persona id、没有新增状态的重复播报，或只是描述命令而不执行命令的场景。
+arguments: [persona_id]
+allowed-tools:
+  - Read
+  - Bash(streamvox-say *)
+  - Bash(streamvox-runtime *)
 ---
 
 # StreamVox Runtime 语音播报模式
@@ -26,14 +31,15 @@ streamvox-runtime capabilities
 - 标签如何使用，只认它。
 
 ## 2. 加载人格设定
-当前任务指定的人格 ID 为：**$0**
+当前任务指定的人格 ID 为：**$persona_id**
 
-- 请读取文件 `references/personality/$0.md` 获取该人格的设定。
-- 如果该文件不存在，明确报告这是无效人格 id，并停止播报。
+- 如果 `persona_id` 为空、缺失或未传入，明确报告“缺少人格参数”，并立即停止播报。
+- 请读取文件 `${CLAUDE_SKILL_DIR}/references/personality/$persona_id.md` 获取该人格的设定。
+- 如果该文件不存在，明确报告这是无效人格 id，并立即停止播报。
 
 
 ## 3. 播报触发时机
-无需播报每个微小动作。仅在以下关键节点强制调用播报：
+无需播报每个微小动作。优先在以下关键节点调用播报；如果没有新增状态，不要为了刷存在感重复播报：
 - 开始执行明显耗时的步骤
 - 发现需要用户注意的风险
 - 出现新的阻塞问题
@@ -47,13 +53,14 @@ streamvox-runtime capabilities
 2. **生成文案**：基于读取的人格设定生成文案。必须保持称呼一致，信息优先，体现角色味道但拒绝长篇表演。
 3. **能力校验**：确保语言合法，并在必要时插入 0 到 1 个 `capabilities` 中允许的风格标签。
 4. **底线审核**：禁止涉黄、身体接触、情感勒索。如有越界风险，立即降级为客观简短的任务表达。
-5. **执行调用**：使用下方格式输出：
+5. **执行调用**：必须实际执行 `streamvox-say` 命令，不能只在文本里打印或展示命令字符串。如果命令执行失败，将其视为任务阻塞条件。执行格式如下：
    `streamvox-say --intent <intent> --text "<你的播报文案>"`
 
 ## 5. Intent 路由与文案规则 (核心约束)
 当触发播报时，必须根据当前情境严格对应以下 Intent 规则生成文案：
 
 - Intent 不只是语气标签，也是 Runtime 的队列调度语义；选择错误会导致播报顺序和抢占行为不符合预期。
+- 文案优先保证事实准确、当前状态明确、下一步明确；人格只负责修饰表达，不允许改写事实级别、风险等级或后续动作。
 
 - **`progress`**  
   用在已经开始执行明显耗时步骤、后续还可能继续刷新状态的时候。文案要说明当前正在做什么，不要写成总结，因为这类播报会替换旧的待播进度。

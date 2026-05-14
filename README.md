@@ -72,7 +72,7 @@ streamvox-runtime start --model voxcpm2-gguf --device auto --output speaker
 ### 静音运行
 
 ```bash
-streamvox-runtime start --model voxcpm2-gguf --device auto --output null
+streamvox-runtime start --model s2-pro-4b-gguf --device auto --output null
 ```
 
 --output null的意思是，Runtime 仍然会正常接收事件、排队、调用模型生成语音，但生成出来的音频不会播放，也不会写文件
@@ -80,7 +80,7 @@ streamvox-runtime start --model voxcpm2-gguf --device auto --output null
 ### 语音输出到文件夹
 
 ```bash
-streamvox-runtime start --model voxcpm2-gguf --device auto --output wav --output-dir ./streamvox_outputs
+streamvox-runtime start --model s2-pro-4b-gguf --device auto --output wav --output-dir ./streamvox_outputs
 ```
 
 如果你启动时只给了 `--model`，但没有显式传 `--streamvox-json` 或 `--streamvox-json-file`：
@@ -262,6 +262,12 @@ streamvox-say --stop
 streamvox-agent init
 ```
 
+如果目标位置已经存在同名 skill：
+
+- 交互式终端里会逐个询问你是否覆盖
+- 选择覆盖后，会直接继续当前目标的安装流程
+- 选择不覆盖时，会跳过当前目标并继续后续目标
+
 默认安装位置：
 
 ```text
@@ -280,7 +286,14 @@ streamvox-agent init --target claude-code
 
 ```bash
 streamvox-agent init --target codex --force
+streamvox-agent init --force
 ```
+
+`--force` 的行为是：
+
+- 不再询问确认
+- 发现已存在安装时直接覆盖
+- 适合脚本、CI 或你已经明确要强制刷新本地 skill 的场景
 
 仓库内置 skill 源文件位于：
 

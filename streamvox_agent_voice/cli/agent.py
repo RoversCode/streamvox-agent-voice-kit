@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import typer
 
 from ..template_installer import (
     DEFAULT_SKILL_NAME,
     SUPPORTED_AGENT_TARGETS,
-    install_builtin_skills,
+    install_builtin_skill,
+    iter_install_targets,
+    target_skill_install_dir,
 )
 
 
@@ -40,7 +45,11 @@ def init(
         "--target",
         help="Target agent: codex or claude-code. Omit to install into both default home skill directories.",
     ),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing installed skill in the selected default home skill directory."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing installed skill without prompting in the selected default home skill directory.",
+    ),
 ) -> None:
     """
     安装唯一的通用 StreamVox skill。
@@ -57,16 +66,63 @@ def init(
     """
 
     try:
-        installed_results = install_builtin_skills(target=target, force=force)
+        installed_results: list[tuple[str, Path, str]] = []
+        skipped_results: list[tuple[str, Path]] = []
+
+        # 逐个目标处理，业务意图是让交互式覆盖确认只影响当前目标，而不是让整批安装一起失败。
+        for target_name in iter_install_targets(target):
+            destination = target_skill_install_dir(target_name)
+            destination_exists = destination.exists()
+            should_force_install = force
+
+            # 已存在且未显式强制覆盖时，先询问用户是否覆盖；选择否时跳过当前目标并继续后续目标。
+            if destination_exists and not force:
+                if not _confirm_overwrite(target=target_name, destination=destination):
+                    skipped_results.append((target_name, destination))
+                    continue
+                should_force_install = True
+
+            installed_path = install_builtin_skill(target=target_name, force=should_force_install)
+            install_status = "overwritten" if destination_exists else "installed"
+            installed_results.append((target_name, installed_path, install_status))
     except (FileExistsError, RuntimeError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
-    # 逐个输出目标与路径，业务意图是让人类和脚本都能直接看到默认安装落点。
-    for installed_target, installed_path in installed_results:
-        typer.echo(f"installed {DEFAULT_SKILL_NAME} for {installed_target}: {installed_path}")
+    # 逐个输出目标与路径，业务意图是让人类和脚本都能直接看到每个目标是安装、覆盖还是跳过。
+    for installed_target, installed_path, install_status in installed_results:
+        typer.echo(f"{install_status} {DEFAULT_SKILL_NAME} for {installed_target}: {installed_path}")
         typer.echo(f"skill entry: {installed_path / 'SKILL.md'}")
+    for skipped_target, skipped_path in skipped_results:
+        typer.echo(f"skipped existing {DEFAULT_SKILL_NAME} for {skipped_target}: {skipped_path}")
     typer.echo(f"supported targets: {', '.join(SUPPORTED_AGENT_TARGETS)}")
+
+
+def _confirm_overwrite(*, target: str, destination: Path) -> bool:
+    """
+    在交互式终端中确认是否覆盖已存在的 skill 安装。
+
+    核心入参:
+        target: 当前正在处理的 Agent 目标名称。
+        destination: 已存在的 skill 安装目录。
+
+    预期输出:
+        用户确认覆盖时返回 True；选择跳过时返回 False。
+
+    边界异常:
+        非交互环境下无法安全提问时抛出 RuntimeError，引导用户改用 --force。
+    """
+
+    # 非交互终端无法可靠读取确认输入，业务意图是避免命令挂起或把 EOF 误判成默认答案。
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            f"skill already exists: {destination}. Re-run with --force to overwrite, or run in an interactive terminal to confirm."
+        )
+
+    return typer.confirm(
+        f"{target} skill already exists at {destination}. Overwrite it?",
+        default=False,
+    )
 
 
 def main() -> None:

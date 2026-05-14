@@ -79,10 +79,10 @@ def install_builtin_skills(*, target: str | None = None, force: bool = False) ->
         force: 已存在时是否覆盖。
 
     预期输出:
-        返回 `(target, installed_path)` 列表，便于 CLI 输出最终安装结果。
+        返回 `(target, installed_path)` 列表，便于非交互调用方输出最终安装结果。
 
     边界异常:
-        任一目标安装失败时抛出异常。
+        任一目标安装失败时抛出异常；是否覆盖已存在目录由调用方通过 force 明确决定。
     """
 
     installed: list[tuple[str, Path]] = []

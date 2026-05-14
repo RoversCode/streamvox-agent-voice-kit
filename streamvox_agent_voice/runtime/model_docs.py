@@ -13,7 +13,7 @@ _MODEL_DOCS_DIR = Path(__file__).resolve().parents[2] / "docs" / "models"
 _MODEL_DOC_FILENAMES: dict[str, str] = {
     "qwen3-tts-clone-0.6b-gguf": "qwen3-tts-clone.md",
     "qwen3-tts-clone-1.7b-gguf": "qwen3-tts-clone.md",
-    "s2-pro": "s2-pro.md",
+    "s2-pro-4b-gguf": "s2-pro.md",
     "voxcpm2-gguf": "voxcpm2.md",
 }
 
