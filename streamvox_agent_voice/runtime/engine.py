@@ -26,7 +26,7 @@ from .model_registry import resolve_model_profile
 DEMO_ROLE_NAME = "demo_role"
 
 # 关键常量：demo_role 固定使用仓库内样例音频，避免每个模型再维护不同入口。
-DEMO_ROLE_AUDIO_PATH = Path(__file__).resolve().parents[2] / "examples" / "Condition3.wav"
+DEMO_ROLE_AUDIO_PATH = Path(__file__).resolve().parents[2] / "examples" / "demo_role.wav"
 
 
 class StreamVoxSpeaker:

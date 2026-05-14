@@ -14,6 +14,8 @@ from typing import Any
 
 _CHILD_SHUTDOWN_GRACE_SECONDS = 3.0
 _RUNTIME_CHILD_ENV = "STREAMVOX_AGENT_VOICE_RUNTIME_CHILD"
+_WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+_WINDOWS_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", None)
 
 
 class RuntimeShutdownGuard:
@@ -252,8 +254,7 @@ def run_supervised_start(
 
     process = subprocess.Popen(
         child_command,
-        env=child_env,
-        start_new_session=True,
+        **build_child_popen_kwargs(env=child_env),
     )
     supervisor = RuntimeProcessSupervisor(process)
     supervisor.install()
@@ -324,12 +325,40 @@ def build_child_start_command(
     return command
 
 
+def build_child_popen_kwargs(*, env: dict[str, str]) -> dict[str, Any]:
+    """
+    构造启动 Runtime 子进程时需要传给 `subprocess.Popen(...)` 的平台参数。
+
+    核心入参:
+        env: 子进程环境变量字典。
+
+    预期输出:
+        Linux / macOS 返回 `start_new_session=True`；
+        Windows 返回 `CREATE_NEW_PROCESS_GROUP`，以便父进程后续发送 CTRL_BREAK_EVENT 并收敛整棵进程树。
+
+    边界异常:
+        不抛业务异常；仅返回可直接透传给 `subprocess.Popen(...)` 的参数字典。
+    """
+
+    popen_kwargs: dict[str, Any] = {"env": env}
+
+    # Windows 没有 POSIX 风格的 session / process group 语义，必须显式创建新的 console process group，
+    # 后续父进程才能优先发送 CTRL_BREAK_EVENT 做温和收敛。
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = _WINDOWS_CREATE_NEW_PROCESS_GROUP
+        return popen_kwargs
+
+    # 非 Windows 维持原有 start_new_session 行为，确保 killpg 可以只影响本次 Runtime 子树。
+    popen_kwargs["start_new_session"] = True
+    return popen_kwargs
+
+
 class RuntimeProcessSupervisor:
     """
     监督 Runtime 子进程组，并在中断时强制收敛退出。
 
     核心入参:
-        process: 通过 start_new_session=True 启动的 Runtime 子进程。
+        process: 通过平台对应的独立进程组参数启动的 Runtime 子进程。
 
     预期输出:
         SIGINT/SIGTERM 到达父进程时，终止整个 Runtime 进程组。
@@ -423,6 +452,11 @@ class RuntimeProcessSupervisor:
         if self._process.poll() is not None:
             return
 
+        # Windows 不支持 os.killpg / SIGKILL，需要改走 CTRL_BREAK_EVENT + terminate/taskkill 的分支。
+        if sys.platform == "win32":
+            self._terminate_runtime_process_windows(grace_seconds=grace_seconds)
+            return
+
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._process.pid, signal.SIGTERM)
 
@@ -434,6 +468,40 @@ class RuntimeProcessSupervisor:
 
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._process.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._process.wait(timeout=1.0)
+
+    def _terminate_runtime_process_windows(self, *, grace_seconds: float) -> None:
+        """
+        在 Windows 上终止 Runtime 子进程及其后代进程。
+
+        核心入参:
+            grace_seconds: 温和终止后等待子进程自行退出的秒数。
+
+        预期输出:
+            先尝试向独立进程组发送 CTRL_BREAK_EVENT；
+            若超时仍未退出，再退化到 terminate，最终使用 `taskkill /T /F` 强制收敛整个进程树。
+
+        边界异常:
+            Windows 控制台事件不可用、taskkill 缺失或目标进程已退出时都忽略，避免在中断路径上引入新异常。
+        """
+
+        # 优先发送 CTRL_BREAK_EVENT，让 Python/uvicorn/模型子任务有机会沿正常清理路径退出。
+        if _WINDOWS_CTRL_BREAK_EVENT is not None:
+            with contextlib.suppress(Exception):
+                self._process.send_signal(_WINDOWS_CTRL_BREAK_EVENT)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._process.wait(timeout=max(grace_seconds, 0.0))
+                return
+
+        # 如果控制台事件没有生效，再尝试普通 terminate；这样比一上来 taskkill 更温和。
+        with contextlib.suppress(Exception):
+            self._process.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._process.wait(timeout=max(grace_seconds, 0.0))
+            return
+
+        _force_kill_process_tree_windows(self._process.pid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             self._process.wait(timeout=1.0)
 
@@ -452,7 +520,7 @@ def collect_descendant_pids(root_pid: int) -> list[int]:
         非 Linux 或 /proc 不可读时返回空列表。
     """
 
-    parent_map = read_proc_parent_map()
+    parent_map = read_parent_map()
     pending = [root_pid]
     descendants: list[int] = []
     while pending:
@@ -461,6 +529,26 @@ def collect_descendant_pids(root_pid: int) -> list[int]:
         descendants.extend(children)
         pending.extend(children)
     return descendants
+
+
+def read_parent_map() -> dict[int, int]:
+    """
+    读取当前平台可见的 pid -> ppid 映射。
+
+    核心入参:
+        无。
+
+    预期输出:
+        Linux / macOS 优先读取 `/proc`；
+        Windows 通过 PowerShell 查询 `Win32_Process`，统一返回父子关系映射。
+
+    边界异常:
+        任一平台的数据源不可用时返回空字典，而不是让中断清理路径失败。
+    """
+
+    if sys.platform == "win32":
+        return read_windows_parent_map()
+    return read_proc_parent_map()
 
 
 def read_proc_parent_map() -> dict[int, int]:
@@ -493,6 +581,50 @@ def read_proc_parent_map() -> dict[int, int]:
         ppid = parse_proc_stat_ppid(raw_stat)
         if ppid is not None:
             parent_map[int(child.name)] = ppid
+    return parent_map
+
+
+def read_windows_parent_map() -> dict[int, int]:
+    """
+    在 Windows 上读取 pid -> ppid 映射。
+
+    核心入参:
+        无。
+
+    预期输出:
+        返回当前系统可见进程的父子关系，供 `collect_descendant_pids(...)` 做递归遍历。
+
+    边界异常:
+        PowerShell 不可用、WMI 读取失败或输出格式异常时返回空字典。
+    """
+
+    completed = _run_best_effort_command(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | "
+            "Select-Object ProcessId,ParentProcessId | "
+            "ConvertTo-Csv -NoTypeInformation",
+        ]
+    )
+    if completed is None or completed.returncode != 0:
+        return {}
+
+    parent_map: dict[int, int] = {}
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('"ProcessId"'):
+            continue
+        fields = [field.strip().strip('"') for field in line.split(",", 1)]
+        if len(fields) != 2:
+            continue
+        try:
+            process_id = int(fields[0])
+            parent_process_id = int(fields[1])
+        except ValueError:
+            continue
+        parent_map[process_id] = parent_process_id
     return parent_map
 
 
@@ -562,3 +694,46 @@ def _write_stderr_line(message: str) -> None:
     with contextlib.suppress(Exception):
         sys.stderr.write(f"\n{message}\n")
         sys.stderr.flush()
+
+
+def _force_kill_process_tree_windows(pid: int) -> None:
+    """
+    在 Windows 上强制终止指定进程及其整棵子进程树。
+
+    核心入参:
+        pid: 根进程 PID。
+
+    预期输出:
+        调用 `taskkill /PID <pid> /T /F`，确保 Runtime 退出后不会遗留模型子进程。
+
+    边界异常:
+        `taskkill` 不可用、目标已退出或系统拒绝访问时忽略，并退化到单进程 kill。
+    """
+
+    completed = _run_best_effort_command(["taskkill", "/PID", str(pid), "/T", "/F"])
+    if completed is not None and completed.returncode == 0:
+        return
+
+    # taskkill 失败时退化到单进程 kill，至少避免父监督进程自己一直挂住。
+    with contextlib.suppress(Exception):
+        os.kill(pid, signal.SIGTERM)
+
+
+def _run_best_effort_command(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """
+    执行一个只服务于清理/探测路径的本地命令。
+
+    核心入参:
+        argv: 要执行的命令及参数。
+
+    预期输出:
+        成功时返回 `CompletedProcess[str]`，供调用方读取退出码和输出文本。
+
+    边界异常:
+        命令不存在或无法启动时返回 None，避免把辅助命令失败升级成主流程失败。
+    """
+
+    try:
+        return subprocess.run(argv, check=False, capture_output=True, text=True)
+    except OSError:
+        return None

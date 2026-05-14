@@ -14,6 +14,7 @@ from ..template_installer import (
     iter_install_targets,
     target_skill_install_dir,
 )
+from ..windows_command_installer import install_windows_commands, is_directory_in_process_path
 
 
 app = typer.Typer(help="Install the built-in StreamVox runtime skill for Codex or Claude Code.", no_args_is_help=True)
@@ -96,6 +97,57 @@ def init(
     for skipped_target, skipped_path in skipped_results:
         typer.echo(f"skipped existing {DEFAULT_SKILL_NAME} for {skipped_target}: {skipped_path}")
     typer.echo(f"supported targets: {', '.join(SUPPORTED_AGENT_TARGETS)}")
+
+
+@app.command("install-windows-commands")
+def install_windows_commands_command(
+    bin_dir: Path | None = typer.Option(
+        None,
+        "--bin-dir",
+        help="Directory used to place global Windows .cmd launchers. Omit to auto-select a user directory that is already in PATH when possible.",
+    ),
+    add_to_path: bool = typer.Option(
+        True,
+        "--add-to-path/--no-add-to-path",
+        help="Add the launcher directory into the current user's PATH so new terminals can call streamvox-* directly.",
+    ),
+) -> None:
+    """
+    在 Windows 上安装可跨终端直接调用的全局命令入口。
+
+    核心入参:
+        bin_dir: `.cmd` 启动器的安装目录。
+        add_to_path: 是否把安装目录加入当前用户 PATH。
+
+    预期输出:
+        成功时输出安装目录、已生成的命令文件以及 PATH 是否被更新。
+
+    边界异常:
+        非 Windows 平台、用户目录不可写或 PATH 更新失败时命令非零退出。
+    """
+
+    try:
+        resolved_bin_dir, created_files, path_updated = install_windows_commands(
+            bin_dir=bin_dir,
+            add_to_path=add_to_path,
+        )
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"installed Windows launchers into: {resolved_bin_dir}")
+    for created_file in created_files:
+        typer.echo(f"launcher: {created_file}")
+    if is_directory_in_process_path(resolved_bin_dir):
+        typer.echo("current terminal can already resolve streamvox-runtime / streamvox-say directly.")
+        return
+    if add_to_path:
+        if path_updated:
+            typer.echo("user PATH updated. Open a new terminal to use streamvox-runtime / streamvox-say directly.")
+        else:
+            typer.echo("launcher directory is already present in user PATH.")
+    else:
+        typer.echo("user PATH was not modified. Use the generated .cmd files directly, or re-run with --add-to-path.")
 
 
 def _confirm_overwrite(*, target: str, destination: Path) -> bool:

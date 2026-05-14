@@ -198,9 +198,18 @@ class SenseVoiceASRService:
         try:
             from ..vendor.sensevoice_onnx.inference import ASREngineConfig, SenseVoiceInference
         except Exception as exc:  # noqa: BLE001
+            # Windows 下 onnxruntime 变体放在项目 optional-dependencies 里，这里补充平台化提示，
+            # 避免用户只看到“缺 onnxruntime”却不知道应该安装 windows-cpu / windows-dml / windows-cuda 哪一个。
+            windows_extra_hint = ""
+            if os.name == "nt":
+                windows_extra_hint = (
+                    "; on Windows install one matching extra first: "
+                    "windows-cpu, windows-dml, or windows-cuda"
+                )
             raise RuntimeError(
                 "failed to import the built-in SenseVoice ASR runtime; "
                 "please ensure sentencepiece and onnxruntime are installed"
+                f"{windows_extra_hint}"
             ) from exc
 
         return ASREngineConfig, SenseVoiceInference

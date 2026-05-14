@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -1306,6 +1307,12 @@ def _detect_total_ram_bytes() -> int | None:
         不抛异常。
     """
 
+    # Windows 上优先走原生内存状态 API；否则当前实现会因为没有 sysconf 和 /proc 而把总内存误判成未知。
+    if sys.platform == "win32":
+        windows_total_ram_bytes = _detect_total_ram_bytes_windows()
+        if windows_total_ram_bytes is not None:
+            return windows_total_ram_bytes
+
     try:
         page_size = int(os.sysconf("SC_PAGE_SIZE"))
         phys_pages = int(os.sysconf("SC_PHYS_PAGES"))
@@ -1327,6 +1334,54 @@ def _detect_total_ram_bytes() -> int | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+def _detect_total_ram_bytes_windows() -> int | None:
+    """
+    通过 Windows 原生内存状态 API 探测系统总内存。
+
+    核心入参:
+        本方法无入参。
+
+    预期输出:
+        成功时返回物理总内存字节数；失败时返回 None。
+
+    边界异常:
+        ctypes 不可用、Win32 API 缺失或调用失败时不抛异常，保持回退到后续通用探测逻辑。
+    """
+
+    try:
+        import ctypes
+    except ImportError:
+        return None
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        """
+        映射 Win32 `MEMORYSTATUSEX` 结构体，只保留 `GlobalMemoryStatusEx(...)` 需要的字段顺序。
+        """
+
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    memory_status = MEMORYSTATUSEX()
+    memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status)) == 0:
+            return None
+    except (AttributeError, OSError):
+        return None
+    return int(memory_status.ullTotalPhys)
 
 
 def _detect_nvidia_gpus(
