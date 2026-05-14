@@ -13,6 +13,7 @@ from typing import Any
 
 
 _CHILD_SHUTDOWN_GRACE_SECONDS = 3.0
+_SUPERVISED_WAIT_POLL_SECONDS = 0.2
 _RUNTIME_CHILD_ENV = "STREAMVOX_AGENT_VOICE_RUNTIME_CHILD"
 _WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _WINDOWS_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", None)
@@ -259,9 +260,38 @@ def run_supervised_start(
     supervisor = RuntimeProcessSupervisor(process)
     supervisor.install()
     try:
-        return process.wait()
+        return wait_for_supervised_process_exit(process)
     finally:
         supervisor.restore()
+
+
+def wait_for_supervised_process_exit(
+    process: subprocess.Popen[Any],
+    *,
+    poll_seconds: float = _SUPERVISED_WAIT_POLL_SECONDS,
+) -> int:
+    """
+    以短轮询方式等待 Runtime 子进程退出。
+
+    核心入参:
+        process: 被监督的 Runtime 子进程。
+        poll_seconds: 单次等待超时时间，默认使用较短轮询间隔。
+
+    预期输出:
+        子进程退出后返回它的退出码。
+
+    边界异常:
+        不吞掉除 `TimeoutExpired` 之外的异常；这样启动失败、句柄异常等问题仍然会直接暴露。
+    """
+
+    # Windows 上直接 `process.wait()` 可能长时间卡在底层等待对象上，导致 Ctrl+C 不能稳定回到 Python 层。
+    # 这里改成短轮询，让父监督进程持续有机会处理 SIGINT/SIGTERM，再去收敛整个 Runtime 子进程树。
+    resolved_poll_seconds = max(float(poll_seconds), 0.05)
+    while True:
+        try:
+            return process.wait(timeout=resolved_poll_seconds)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def build_child_start_command(
