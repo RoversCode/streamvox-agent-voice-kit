@@ -302,6 +302,10 @@ class VoiceClient:
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             response = await client.get(f"{self.base_url}/capabilities")
             response.raise_for_status()
+            # Windows 场景下，纯文本响应如果依赖服务端头或客户端默认推断，
+            # 很容易被本地代码页或错误 charset 误导成乱码。
+            # 这里直接把 Runtime 自己承诺为 UTF-8 的 Markdown 文档固定按 UTF-8 解码。
+            response.encoding = "utf-8"
             return response.text
 
     async def realtime_selftest(

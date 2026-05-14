@@ -15,6 +15,7 @@ from ..template_installer import (
     target_skill_install_dir,
 )
 from ..windows_command_installer import install_windows_commands, is_directory_in_process_path
+from .console_encoding import ensure_utf8_stdio_for_windows
 
 
 app = typer.Typer(help="Install the built-in StreamVox runtime skill for Codex or Claude Code.", no_args_is_help=True)
@@ -191,6 +192,7 @@ def main() -> None:
         Typer 负责把参数错误转换为 CLI 错误提示。
     """
 
+    ensure_utf8_stdio_for_windows()
     app()
 
 

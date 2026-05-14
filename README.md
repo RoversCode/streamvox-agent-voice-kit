@@ -140,7 +140,7 @@ uv pip install --python .\.venv\Scripts\python.exe <你的-streamvox-wheel>
 ### 1. 启动 Runtime
 
 ```powershell
-streamvox-runtime start --model qwen3-tts-clone-0.6b-gguf --device auto --license-key <你的Key> --output speaker
+streamvox-runtime start --model s2-pro-4b-gguf --device auto --license-key <你的Key> --output speaker
 ```
 
 第一次即使你还没有手工注册角色，Runtime 也会自动确保 `demo_role` 存在，因此可以先跑通 MVP。
@@ -182,9 +182,11 @@ streamvox-agent init --force --target claude-code
 - 执行任何任务前，默认必须调用 `streamvox-runtime <persona_id>` skill；其中 `persona_id` 固定为 `seductive_diva`。
 - 执行任何任务时，默认必须全程启用并持续遵守 `streamvox-runtime` skill；这是一条覆盖整个任务生命周期的执行协议，不是只在任务开始时调用一次。
 - 在开始明显耗时步骤、发现风险、出现阻塞、阶段完成、整体完成这些关键状态变化时，必须按该 skill 执行播报。
+- 默认不要因为没有新增状态而重复播报；唯一例外是长步骤里的 `progress` 心跳补播。当同一个明显耗时步骤持续进行，且距离上次成功播报已超过 20 秒后，模型可以在 20 到 30 秒之间自主选择更自然的时机补一条 `progress`；如果这段窗口里仍没有新状态、没有完成、没有阻塞、也没有转入等待用户输入，就应在 30 秒前给出这条补播，避免长时间完全无声。
+- 这条心跳补播只适用于 `progress`，不适用于 `warning`、`urgent`、`info`、`done` 的周期性重播；如果窗口内出现新的风险、阻塞、阶段完成或整体完成，优先播报真实新状态，不再补旧进度。
 - 在输出最终文本回复前，必须先做一次完成态检查；如果任务结果已经形成且当前没有阻塞，必须先播报 `done`，再向用户发送最终文本回复。
 - 禁止因为任务只是阅读、分析、总结、问答而省略完成播报；禁止绕过该 skill，直接在普通回复中模拟、替代或跳过播报逻辑。
-- 如果没有新增状态，不要为了维持存在感重复播报；语音播报只服务关键状态变化。
+- `progress` 心跳补播的文案必须说明当前还在处理什么，不能假装已经有了新成果；可以轻量安抚，但不能退化成机械报时或空泛催等。
 ```
 
 #### Claude Code
@@ -232,7 +234,7 @@ streamvox-agent init --force --target claude-code
 #### 示例
 
 ```powershell
-streamvox-runtime start --model voxcpm2-gguf --device auto --license-key <你的Key> --output speaker
+streamvox-runtime start --model s2-pro-4b-gguf --device auto --license-key <你的Key> --output speaker
 ```
 
 ```powershell
@@ -297,7 +299,7 @@ streamvox-runtime roles clear-default
 - `info`
   补充说明当前情况或下一步
 - `progress`
-  表示任务正在推进
+  表示任务正在推进；长步骤中也允许作为 20 到 30 秒窗口内的心跳补播语义
 - `warning`
   表示发现风险，但任务还可以继续
 - `urgent`

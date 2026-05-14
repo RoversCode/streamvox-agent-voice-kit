@@ -10,6 +10,7 @@ import httpx
 import typer
 
 from ..client import VoiceClient
+from .console_encoding import ensure_utf8_stdio_for_windows
 
 
 app = typer.Typer(help="Send speech events to the local StreamVox Runtime.", invoke_without_command=True)
@@ -251,6 +252,7 @@ def main() -> None:
         Typer 负责把参数错误转换为 CLI 错误提示。
     """
 
+    ensure_utf8_stdio_for_windows()
     app()
 
 

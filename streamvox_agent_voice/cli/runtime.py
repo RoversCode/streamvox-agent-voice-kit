@@ -17,6 +17,7 @@ from ..runtime import (
     recommend_model_profiles,
 )
 from .json_options import parse_json_object_option
+from .console_encoding import ensure_utf8_stdio_for_windows
 from .runtime_probe import (
     DEFAULT_REALTIME_SELFTEST_TEXT,
     build_benchmark_summary,
@@ -565,6 +566,7 @@ def main() -> None:
         Typer 负责把参数错误转换为 CLI 错误提示。
     """
 
+    ensure_utf8_stdio_for_windows()
     app()
 
 
